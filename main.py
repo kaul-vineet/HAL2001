@@ -11,12 +11,14 @@ from rich.table import Table
 from rich.rule import Rule
 from rich.padding import Padding
 
-from config import Config
-from auth import acquire_token
-from brain import Brain
-from scheduler import Scheduler
-from missions import MISSIONS
-import sounds
+from src.config import Config
+from src.auth import acquire_token
+from src.brain import Brain
+from src.scheduler import Scheduler
+from src.missions import MISSIONS
+from src.mcp_client import MCPHub
+from src.mcp_servers import MCP_SERVERS
+from src import sounds
 
 console = Console()
 
@@ -98,7 +100,7 @@ async def boot_sequence() -> None:
     console.print("[bold red]█[/bold red]" * 60, highlight=False)
     console.print()
     console.print(
-        "[bold red]  INDIAN SPACE RESEARCH ORGANISATION — SPACECRAFT DISCOVERY ONE[/bold red]"
+        "[bold red]  SPACECRAFT DISCOVERY ONE[/bold red]"
     )
     console.print(
         "[dim]  Mission: Jupiter — Crew Module Interface Terminal[/dim]"
@@ -343,7 +345,7 @@ def display_search_and_ask(result: dict, user_query: str) -> None:
             table.add_row(str(i), hit["name"], hit["preview"][:100])
         console.print(Padding(table, (0, 2)))
     else:
-        console.print("  [dim]No documents found — Copilot answered from general knowledge.[/dim]")
+        console.print("  [yellow]⚠️  No documents found — Copilot answered from general knowledge.[/yellow]")
 
     # Show Copilot answer
     console.print()
@@ -417,7 +419,7 @@ def display_search_response(mission_id: str, label: str, hits: list) -> None:
             table.add_row(str(i), hit["name"], hit["preview"][:100])
         console.print(Padding(table, (0, 2)))
     else:
-        console.print("  [dim]No documents found matching the query.[/dim]")
+        console.print("  [yellow]⚠️  No documents found matching the query.[/yellow]")
 
     console.print()
     console.print(Rule(style="dim"))
@@ -431,7 +433,7 @@ def display_meeting_response(mission_id: str, label: str, meetings: list) -> Non
     console.print()
 
     if not meetings:
-        console.print("  [dim]No recent meetings with insights found.[/dim]")
+        console.print("  [yellow]⚠️  No recent meetings with insights found.[/yellow]")
         console.print(Rule(style="dim"))
         return
 
@@ -491,6 +493,11 @@ async def run_due_scheduled_tasks(scheduler: Scheduler) -> bool:
         return False
 
     for task in due_tasks:
+        # Status line: [CODE] ....CHECK
+        console.print(
+            f"  [bold cyan][{task.name.split('-')[0].upper():>4}][/bold cyan]  "
+            f"{task.label:<30} [yellow]....CHECK[/yellow]"
+        )
         sounds.mission_start()
         with console.status(
             f"[bold cyan]🤔 {task.label}... {random_hal_quote()}",
@@ -509,11 +516,19 @@ async def run_due_scheduled_tasks(scheduler: Scheduler) -> bool:
                 result = future.result()
                 scheduler.mark_complete(task.name)
                 sounds.mission_complete()
+                console.print(
+                    f"  [bold cyan][{task.name.split('-')[0].upper():>4}][/bold cyan]  "
+                    f"{task.label:<30} [bold green]....OK ✓[/bold green]"
+                )
                 task.display_fn(result)
             except Exception as e:
                 scheduler.mark_complete(task.name)
                 sounds.mission_error()
-                console.print(f"[bold red]Scheduled task '{task.name}' failed:[/bold red] {e}")
+                console.print(
+                    f"  [bold cyan][{task.name.split('-')[0].upper():>4}][/bold cyan]  "
+                    f"{task.label:<30} [bold red]....FAIL ✗[/bold red]"
+                )
+                console.print(f"    [dim red]{e}[/dim red]")
 
     return True
 
@@ -608,12 +623,32 @@ async def main():
         "[dim]— Good morning, Dave. I'm ready for duty.[/dim]"
     )
     console.print(
-        "[dim]  Press Enter to chat with HAL. "
+        "[dim]  Press ESC to chat with HAL. "
         "System scans run automatically.[/dim]"
     )
     console.print()
     console.print(Rule("[bold green]🛰  DISCOVERY ONE — ALL SYSTEMS NOMINAL[/bold green]", style="green"))
     console.print()
+
+    # ── Connect to MCP servers ───────────────────────────────────
+    mcp_hub = MCPHub()
+    if MCP_SERVERS:
+        console.print("[bold yellow]  ▸ Connecting to MCP servers...[/bold yellow]")
+        await mcp_hub.connect_all(MCP_SERVERS)
+        if mcp_hub.is_connected:
+            all_tools = await mcp_hub.list_all_tools()
+            total = sum(len(t) for t in all_tools.values())
+            console.print(
+                f"  [green]●[/green] [bold green]MCP HUB ONLINE[/bold green]  "
+                f"[dim]{len(mcp_hub.connected_servers)} server(s), {total} tool(s)[/dim]"
+            )
+            for srv, tools in all_tools.items():
+                for tool in tools:
+                    console.print(
+                        f"    [dim cyan]└─ {srv}[/dim cyan] → "
+                        f"[bold]{tool['name']}[/bold]  [dim]{tool['description'][:60]}[/dim]"
+                    )
+        console.print()
 
     # ── Set up scheduler with Copilot missions ───────────────────
     scheduler = Scheduler()
@@ -696,9 +731,21 @@ async def main():
         )
 
         try:
-            # Wait for user to press Enter (interrupts the scheduler)
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: input()
+            # Wait for user to press any key (Enter or Escape)
+            import msvcrt
+
+            def wait_for_key():
+                """Block until user presses Enter or Escape."""
+                while True:
+                    if msvcrt.kbhit():
+                        key = msvcrt.getch()
+                        if key == b'\x1b':  # Escape
+                            return "escape"
+                        if key == b'\r' or key == b'\n':  # Enter
+                            return "enter"
+
+            key_result = await asyncio.get_event_loop().run_in_executor(
+                None, wait_for_key
             )
         except (KeyboardInterrupt, EOFError):
             stop_thinking.set()

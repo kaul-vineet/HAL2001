@@ -7,13 +7,31 @@ Meeting Insights API: AI-generated summaries, action items from Teams meetings.
 Requires: M365 Copilot license per user.
 """
 
+import re
 import httpx
-from rich.console import Console
 
-from auth import acquire_token
+from src.auth import acquire_token
 
 GRAPH_BASE = "https://graph.microsoft.com/beta"
 GRAPH_V1 = "https://graph.microsoft.com/v1.0"
+
+
+def _clean_response(text: str) -> str:
+    """Strip citation markers, reference links, and XML tags from Copilot responses."""
+    # Remove [^1^], [^2^], etc.
+    text = re.sub(r'\[\^\d+\^\]', '', text)
+    # Remove [1], [2], etc.
+    text = re.sub(r'\[\d+\]', '', text)
+    # Remove markdown links but keep the display text: [text](url) → text
+    text = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', text)
+    # Remove bare URLs
+    text = re.sub(r'https?://\S+', '', text)
+    # Remove XML-style tags like <Event>, <Person>, <File>
+    text = re.sub(r'</?[A-Za-z]+>', '', text)
+    # Clean up extra whitespace
+    text = re.sub(r'  +', ' ', text)
+    text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
+    return text.strip()
 
 
 class Brain:
@@ -132,7 +150,7 @@ class Brain:
         if not chunks:
             return {
                 "chunks": [],
-                "summary": f"No relevant content found for: {query}",
+                "summary": f"⚠️ No relevant content found for: {query}",
             }
 
         # Build context from retrieved chunks
@@ -193,10 +211,10 @@ class Brain:
             if msg.get("@odata.type", "").endswith("ResponseMessage"):
                 text = msg.get("text", "")
                 if text and text != prompt:
-                    return text
+                    return _clean_response(text)
         # Fallback: try older response format
         if "message" in data and "text" in data["message"]:
-            return data["message"]["text"]
+            return _clean_response(data["message"]["text"])
         return str(data)
 
     # ── Meeting Insights API ─────────────────────────────────────

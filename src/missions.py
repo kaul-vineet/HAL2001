@@ -19,8 +19,8 @@ MISSIONS = [
         "label": "Outlook Inbox",
         "type": "chat",
         "prompt": (
-            "In ONE line: how many emails today, how many need my reply, "
-            "and top 3 senders. No detail, just counts."
+            "Summarize my emails from the last 100 days in 2-3 lines. "
+            "Highlight the key topics discussed across emails."
         ),
         "interval": 30,
     },
@@ -30,8 +30,8 @@ MISSIONS = [
         "label": "Teams",
         "type": "chat",
         "prompt": (
-            "In ONE line: how many unread Teams messages or mentions need "
-            "my attention today. Just the count and who from."
+            "Summarize and highlight the key topics of my Teams messages "
+            "and mentions from the last 100 days in 2-3 lines."
         ),
         "interval": 30,
     },
@@ -78,7 +78,7 @@ MISSIONS = [
         "type": "chat",
         "prompt": (
             "In ONE line: any documents shared with me or modified in my "
-            "SharePoint sites in the last 24 hours. Just count and names."
+            "SharePoint sites in the last 100 days. Just count and names."
         ),
         "interval": 30,
     },
@@ -100,14 +100,13 @@ MISSIONS = [
     {
         "id": "policy-updates",
         "code": "PLCY",
-        "label": "Policy Updates",
+        "label": "Motor Control Brief",
         "type": "retrieval",
-        "query": "latest policy changes or updates this week",
+        "query": "Motor Control Optimization Brief",
         "data_source": "sharePoint",
         "instruction": (
-            "In ONE line: any policy changes this week? "
-            "If none, just say 'No policy updates'. "
-            "If yes, state the policy name and one-line summary."
+            "Give details of Motor Control Optimization Brief. "
+            "Summarize key points, objectives, and any action items."
         ),
         "interval": 30,
     },
@@ -116,7 +115,7 @@ MISSIONS = [
         "code": "COMP",
         "label": "Compliance",
         "type": "retrieval",
-        "query": "compliance requirements data retention security updates",
+        "query": "compliance requirements data retention security updates last 100 days",
         "data_source": "sharePoint",
         "instruction": (
             "In ONE line: any compliance updates needing attention? "
@@ -129,10 +128,10 @@ MISSIONS = [
         "code": "PROJ",
         "label": "Project Docs",
         "type": "retrieval",
-        "query": "project status updates milestones deliverables this week",
+        "query": "project status updates milestones deliverables last 100 days",
         "data_source": "sharePoint",
         "instruction": (
-            "In ONE line: any project doc updates this week? "
+            "In ONE line: any project doc updates in the last 100 days? "
             "Just count and doc names. If none, say 'No updates'."
         ),
         "interval": 30,
@@ -142,7 +141,7 @@ MISSIONS = [
         "code": "KNOW",
         "label": "Knowledge Base",
         "type": "retrieval",
-        "query": "recently added or updated knowledge articles how-to guides",
+        "query": "recently added or updated knowledge articles how-to guides last 100 days",
         "data_source": "sharePoint",
         "instruction": (
             "In ONE line: any new knowledge base articles? "
@@ -157,7 +156,7 @@ MISSIONS = [
         "code": "DOCS",
         "label": "Recent Documents",
         "type": "search",
-        "query": "documents shared with me or modified in the last 24 hours",
+        "query": "documents shared with me or modified in the last 100 days",
         "interval": 30,
     },
 

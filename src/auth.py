@@ -13,7 +13,7 @@ import logging
 from msal import PublicClientApplication, TokenCache
 from rich.console import Console
 
-from config import Config
+from src.config import Config
 
 console = Console()
 logger = logging.getLogger(__name__)
