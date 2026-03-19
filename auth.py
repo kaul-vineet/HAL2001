@@ -1,28 +1,109 @@
-"""Azure AD authentication using device code flow."""
+"""Azure AD authentication with persistent token cache.
 
-from azure.identity import DeviceCodeCredential
+Uses MSAL PublicClientApplication with:
+1. Silent token acquisition (cached)
+2. Interactive login fallback (browser popup)
+3. Local token cache persisted to disk
+"""
+
+import os
+import json
+import logging
+
+from msal import PublicClientApplication, TokenCache
 from rich.console import Console
 
 from config import Config
 
 console = Console()
+logger = logging.getLogger(__name__)
+
+CACHE_PATH = ".local_token_cache.json"
 
 
-def get_credential() -> DeviceCodeCredential:
-    """Create a device code credential for interactive CLI login.
+class LocalTokenCache(TokenCache):
+    """MSAL token cache that persists to a local JSON file."""
 
-    The user will be shown a URL and code to authenticate in a browser.
+    def __init__(self, cache_location: str):
+        super().__init__()
+        self._cache_location = cache_location
+        self._has_state_changed = False
+
+        if not os.path.exists(self._cache_location):
+            with self._lock:
+                with open(self._cache_location, "w") as f:
+                    json.dump({}, f)
+        else:
+            with self._lock:
+                with open(self._cache_location, "r") as f:
+                    self._cache = json.load(f)
+
+    def add(self, event, **kwargs):
+        super().add(event, **kwargs)
+        self._has_state_changed = True
+
+    def modify(self, credential_type, old_entry, new_key_value_pairs=None):
+        super().modify(credential_type, old_entry, new_key_value_pairs)
+        self._has_state_changed = True
+
+    def save(self):
+        """Write cache to disk if changed."""
+        if self._has_state_changed:
+            with self._lock:
+                if self._has_state_changed:
+                    with open(self._cache_location, "w") as f:
+                        json.dump(self._cache, f)
+                    self._has_state_changed = False
+
+
+# Shared cache instance
+TOKEN_CACHE = LocalTokenCache(CACHE_PATH)
+
+# Graph API scopes needed for Copilot APIs
+GRAPH_SCOPES = ["https://graph.microsoft.com/.default"]
+
+
+def acquire_token() -> str:
+    """Acquire a Graph API access token using MSAL.
+
+    Tries silent acquisition first (from cache), falls back to
+    interactive browser login.
+
+    Returns:
+        Access token string.
     """
-
-    def callback(verification_uri: str, user_code: str, expires_on):
-        console.print(
-            f"\n[bold yellow]🔑 To sign in, open [link={verification_uri}]{verification_uri}[/link] "
-            f"and enter code: [bold cyan]{user_code}[/bold cyan][/bold yellow]\n"
-        )
-
-    credential = DeviceCodeCredential(
+    pca = PublicClientApplication(
         client_id=Config.AZURE_CLIENT_ID,
-        tenant_id=Config.AZURE_TENANT_ID,
-        prompt_callback=callback,
+        authority=f"https://login.microsoftonline.com/{Config.AZURE_TENANT_ID}",
+        token_cache=TOKEN_CACHE,
     )
-    return credential
+
+    response = None
+    retry_interactive = False
+
+    try:
+        accounts = pca.get_accounts()
+        if accounts:
+            response = pca.acquire_token_silent(GRAPH_SCOPES, account=accounts[0])
+            if not response or "access_token" not in response:
+                retry_interactive = True
+        else:
+            retry_interactive = True
+    except Exception as e:
+        retry_interactive = True
+        logger.error(f"Silent token acquisition failed: {e}")
+
+    if retry_interactive:
+        console.print(
+            "[bold yellow]  ▸ Opening browser for Microsoft login...[/bold yellow]"
+        )
+        response = pca.acquire_token_interactive(scopes=GRAPH_SCOPES)
+
+    # Save cache after any token operation
+    TOKEN_CACHE.save()
+
+    if response and "access_token" in response:
+        return response["access_token"]
+
+    error = response.get("error_description", "Unknown error") if response else "No response"
+    raise RuntimeError(f"Token acquisition failed: {error}")

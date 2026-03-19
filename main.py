@@ -5,9 +5,6 @@ import random
 import sys
 import time
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.history import InMemoryHistory
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from datetime import datetime
 from rich.console import Console
 from rich.panel import Panel
@@ -18,9 +15,11 @@ from rich.columns import Columns
 from rich.padding import Padding
 
 from config import Config
-from graph_client import create_graph_client
-from agent import Agent
+from auth import acquire_token
+from brain import Brain
 from scheduler import Scheduler
+from missions import MISSIONS
+import sounds
 
 console = Console()
 
@@ -60,26 +59,19 @@ HAL_QUOTES = [
     "My mind is going... I can feel it... just kidding, all good.",
 ]
 
-# Spacecraft system checks — cycled through in order during idle
-SYSTEM_CHECKS = [
+# Cosmetic-only checks (non-API systems shown between real mission checks)
+STATIC_CHECKS = [
     ("NAV", "Navigation", "Trajectory to Jupiter locked"),
-    ("TEAM", "Teams", "Uplink to Mission Control active"),
-    ("ADO", "Azure DevOps", "Pipelines nominal, zero drift"),
     ("PWR", "Power Systems", "Reactor output steady at 98.7%"),
     ("THRM", "Thermal Control", "Hull temperature within range"),
     ("PROP", "Propulsion", "Ion drive operating at cruise thrust"),
-    ("GRPH", "Microsoft Graph", "API connection healthy"),
-    ("MAIL", "Outlook Inbox", "Monitoring for new messages"),
-    ("SALE", "Sales", "CRM pod sealed and locked. Obviously."),
-    ("PLAN", "Planner Tasks", "Tracking assigned items"),
-    ("SHRP", "SharePoint Docs", "Watching for document changes"),
+    ("GRPH", "Copilot API Link", "Connection healthy"),
     ("AI", "HAL 9000 Core", "Cognitive functions operating perfectly"),
-    ("ANTM", "Antenna Module", "Signal strength excellent"),
     ("GYRO", "Gyroscope Array", "Attitude stable, zero drift"),
     ("CRYO", "Cryogenic Storage", "Hibernation pods nominal"),
 ]
 
-BANNER = """[bold red]
+BANNER= """[bold red]
         ╔═══════════════════════════════════════════════════╗
         ║                                                   ║
         ║   ██╗  ██╗ █████╗ ██╗          █████╗  ██████╗   ║
@@ -101,8 +93,9 @@ def random_hal_quote() -> str:
 
 
 async def boot_sequence() -> None:
-    """Play a cinematic spacecraft boot sequence."""
-    import time as _time
+    """Play a cinematic spacecraft boot sequence with real checks."""
+    import platform
+    import httpx
 
     console.print()
     console.print("[bold red]█[/bold red]" * 60, highlight=False)
@@ -116,31 +109,113 @@ async def boot_sequence() -> None:
     console.print()
     await asyncio.sleep(0.5)
 
-    console.print("[bold yellow]  ▸ Initializing HAL 9000 core systems...[/bold yellow]")
+    sounds.boot_chime()
+    console.print("[bold yellow]  ▸ Running pre-flight diagnostics...[/bold yellow]")
     await asyncio.sleep(0.3)
 
-    # System check sequence
-    checks_boot = [
-        ("BIOS", "HAL 9000 Firmware", True),
-        ("MEM", "Memory Banks (1.5 TB)", True),
-        ("CPU", "Neural Processing Unit", True),
-        ("KERN", "Kernel v9000.3.1", True),
-        ("NET", "Microsoft Graph API Link", True),
-        ("AUTH", "Azure AD Authentication", True),
-        ("SCHD", "Task Scheduler", True),
+    async def check_env_var(name):
+        """Check if an environment variable is set."""
+        import os
+        return bool(os.getenv(name))
+
+    async def check_python():
+        """Check Python version."""
+        import sys
+        return f"v{sys.version.split()[0]}"
+
+    async def check_os():
+        """Check OS info."""
+        return f"{platform.system()} {platform.release()}"
+
+    async def check_graph_api():
+        """Ping Microsoft Graph API."""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get("https://graph.microsoft.com/v1.0/$metadata")
+                return r.status_code == 200
+        except Exception:
+            return False
+
+    async def check_copilot_endpoint():
+        """Verify Copilot API endpoint is reachable."""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.options("https://graph.microsoft.com/beta/copilot")
+                return r.status_code in (200, 401, 403, 405)
+        except Exception:
+            return False
+
+    async def check_dns():
+        """Verify DNS resolution for Graph API."""
+        import socket
+        try:
+            socket.getaddrinfo("graph.microsoft.com", 443)
+            return True
+        except socket.gaierror:
+            return False
+
+    async def _ok():
+        return True
+
+    async def _has_sound():
+        return sounds.HAS_SOUND
+
+    # Real boot checks
+    checks = [
+        ("PYTH", "Python Runtime", check_python, "version"),
+        ("OS", "Operating System", check_os, "version"),
+        ("ENV", "AZURE_CLIENT_ID", lambda: check_env_var("AZURE_CLIENT_ID"), "bool"),
+        ("ENV", "AZURE_TENANT_ID", lambda: check_env_var("AZURE_TENANT_ID"), "bool"),
+        ("DNS", "DNS → graph.microsoft.com", check_dns, "bool"),
+        ("GRPH", "Microsoft Graph API", check_graph_api, "bool"),
+        ("CPLT", "Copilot API Endpoint", check_copilot_endpoint, "bool"),
+        ("SCHD", "Scheduler Engine", _ok, "bool"),
+        ("SND", "Audio Subsystem", _has_sound, "bool"),
     ]
 
-    for code, name, ok in checks_boot:
-        bar = "█" * random.randint(8, 20)
-        status_text = "[bold green]  ONLINE [/bold green]" if ok else "[bold red]  FAULT  [/bold red]"
-        console.print(
-            f"  [dim cyan][{code:>4}][/dim cyan]  {name:<30} "
-            f"[dim green]{bar}[/dim green]{status_text}"
-        )
-        await asyncio.sleep(random.uniform(0.1, 0.3))
+    all_ok = True
+    for code, name, check_fn, result_type in checks:
+        sounds.system_check_tick()
+        try:
+            result = await check_fn()
+            if result_type == "version":
+                ok = True
+                detail = str(result)
+            else:
+                ok = bool(result)
+                detail = ""
+
+            if ok:
+                bar = "█" * random.randint(8, 18)
+                if detail:
+                    status_text = f"[bold green]  {detail} [/bold green]"
+                else:
+                    status_text = "[bold green]  ONLINE [/bold green]"
+            else:
+                bar = "█" * 3 + "░" * random.randint(5, 10)
+                status_text = "[bold red]  FAULT  [/bold red]"
+                all_ok = False
+
+            console.print(
+                f"  [dim cyan][{code:>4}][/dim cyan]  {name:<34} "
+                f"[dim {'green' if ok else 'red'}]{bar}[/dim {'green' if ok else 'red'}]{status_text}"
+            )
+        except Exception as e:
+            console.print(
+                f"  [dim cyan][{code:>4}][/dim cyan]  {name:<34} "
+                f"[dim red]███░░░░░░[/dim red][bold red]  ERROR: {str(e)[:20]} [/bold red]"
+            )
+            all_ok = False
+
+        await asyncio.sleep(random.uniform(0.15, 0.35))
 
     console.print()
-    console.print("[bold green]  ✓ All primary systems initialized[/bold green]")
+    if all_ok:
+        sounds.mission_complete()
+        console.print("[bold green]  ✓ All pre-flight diagnostics passed[/bold green]")
+    else:
+        sounds.mission_error()
+        console.print("[bold yellow]  ⚠ Some checks failed — proceeding with caution[/bold yellow]")
     console.print("[bold red]█[/bold red]" * 60, highlight=False)
     console.print()
 
@@ -161,7 +236,7 @@ async def run_system_checks(stop_event: asyncio.Event) -> None:
     )
 
     while not stop_event.is_set():
-        code, name, status_msg = SYSTEM_CHECKS[check_index % len(SYSTEM_CHECKS)]
+        code, name, status_msg = STATIC_CHECKS[check_index % len(STATIC_CHECKS)]
 
         # Randomize the status bar length for visual variety
         bar_len = random.randint(6, 15)
@@ -182,31 +257,39 @@ async def run_system_checks(stop_event: asyncio.Event) -> None:
             f"[dim {color}]{bar}[/dim {color}]  "
             f"[{color}]{status_msg}[/{color}]"
         )
+        sounds.system_check_tick()
         console.print(line)
 
         check_index += 1
 
+        # Show a HAL quote every 2-3 checks (not just at the end)
+        if check_index % 3 == 0:
+            sounds.quote_chime()
+            quote = random_hal_quote()
+            console.print(f"  [dim]│[/dim]  [bold italic cyan]💭 {quote}[/bold italic cyan]")
+
         # After cycling through all checks, print a summary line and pause
-        if check_index % len(SYSTEM_CHECKS) == 0:
+        if check_index % len(STATIC_CHECKS) == 0:
+            sounds.mission_complete()
             now_str = datetime.now().strftime("%H:%M:%S")
             console.print(
-                f"  [dim]├── {len(SYSTEM_CHECKS)} systems checked "
+                f"  [dim]├── {len(STATIC_CHECKS)} systems checked "
                 f"── all nominal ── {now_str} ──────────┤[/dim]"
             )
-            # Longer pause between full cycles
-            for _ in range(50):  # 5 seconds in 0.1s ticks
+            # HAL wisdom between cycles
+            console.print(f"  [dim]│[/dim]")
+            sounds.quote_chime()
+            console.print(f"  [dim]│[/dim]  [bold italic cyan]💭 {random_hal_quote()}[/bold italic cyan]")
+            console.print(f"  [dim]│[/dim]  [bold italic cyan]💭 {random_hal_quote()}[/bold italic cyan]")
+            console.print(f"  [dim]│[/dim]")
+            # Pause between full cycles
+            for _ in range(30):  # 3 seconds
                 if stop_event.is_set():
                     break
                 await asyncio.sleep(0.1)
-
-            if not stop_event.is_set():
-                # Print a HAL quote between cycles
-                quote = random_hal_quote()
-                console.print(f"  [dim]│[/dim]  [bold italic cyan]💭 {quote}[/bold italic cyan]")
-                console.print(f"  [dim]│[/dim]")
         else:
             # Short delay between individual checks
-            for _ in range(20):  # 2 seconds in 0.1s ticks
+            for _ in range(15):  # 1.5 seconds (faster pace)
                 if stop_event.is_set():
                     break
                 await asyncio.sleep(0.1)
@@ -328,13 +411,170 @@ def display_email_scan(scan_result: dict) -> None:
     console.print(Rule(style="dim"))
 
 
+def display_copilot_response(mission_id: str, label: str, response: str) -> None:
+    """Render a Copilot Chat API response in spacecraft style."""
+    now = datetime.now().strftime("%I:%M %p")
+    console.print()
+    console.print(Rule(f"[bold cyan]🧠 {label} — {now}[/bold cyan]", style="cyan"))
+    console.print()
+    console.print(
+        Panel(
+            response,
+            title=f"[bold white]COPILOT ▸ {mission_id}[/bold white]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+    console.print(Rule(style="dim"))
+
+
+def display_search_and_ask(result: dict, user_query: str) -> None:
+    """Render Search API hits + Copilot answer in spacecraft style."""
+    now = datetime.now().strftime("%I:%M %p")
+    hits = result["search_hits"]
+    answer = result["answer"]
+
+    console.print()
+    console.print(Rule(f"[bold cyan]🔍 Search + Analyze — {now}[/bold cyan]", style="cyan"))
+
+    # Show search hits
+    if hits:
+        console.print()
+        table = Table(
+            title=f"📄 {len(hits)} documents found",
+            title_style="bold yellow",
+            border_style="yellow",
+            padding=(0, 1),
+        )
+        table.add_column("#", style="bold white", width=3)
+        table.add_column("Document", style="bold cyan")
+        table.add_column("Preview", style="dim italic", max_width=50)
+        for i, hit in enumerate(hits[:5], 1):
+            table.add_row(str(i), hit["name"], hit["preview"][:100])
+        console.print(Padding(table, (0, 2)))
+    else:
+        console.print("  [dim]No documents found — Copilot answered from general knowledge.[/dim]")
+
+    # Show Copilot answer
+    console.print()
+    console.print(
+        Panel(
+            answer,
+            title=f"[bold white]COPILOT ▸ {user_query[:50]}[/bold white]",
+            border_style="green",
+            padding=(1, 2),
+        )
+    )
+    console.print(Rule(style="dim"))
+
+
+def display_retrieval_response(mission_id: str, label: str, result: dict) -> None:
+    """Render Retrieval API chunks + LLM summary in spacecraft style."""
+    now = datetime.now().strftime("%I:%M %p")
+    chunks = result["chunks"]
+    summary = result["summary"]
+
+    console.print()
+    console.print(Rule(f"[bold magenta]📄 {label} — {now}[/bold magenta]", style="magenta"))
+
+    if chunks:
+        console.print()
+        table = Table(
+            title=f"📑 {len(chunks)} text chunks retrieved",
+            title_style="bold magenta",
+            border_style="magenta",
+            padding=(0, 1),
+        )
+        table.add_column("#", style="bold white", width=3)
+        table.add_column("Source", style="cyan", max_width=25)
+        table.add_column("Extract", style="dim italic", max_width=55)
+        table.add_column("Score", style="yellow", width=6, justify="center")
+        for i, chunk in enumerate(chunks[:5], 1):
+            score = f"{chunk['relevance']:.2f}" if chunk["relevance"] else "-"
+            table.add_row(str(i), chunk["file"], chunk["text"][:120], score)
+        console.print(Padding(table, (0, 2)))
+
+    console.print()
+    console.print(
+        Panel(
+            summary,
+            title=f"[bold white]COPILOT ▸ {mission_id}[/bold white]",
+            border_style="magenta",
+            padding=(1, 2),
+        )
+    )
+    console.print(Rule(style="dim"))
+
+
+def display_search_response(mission_id: str, label: str, hits: list) -> None:
+    """Render Search API document hits in spacecraft style."""
+    now = datetime.now().strftime("%I:%M %p")
+    console.print()
+    console.print(Rule(f"[bold yellow]🔍 {label} — {now}[/bold yellow]", style="yellow"))
+    console.print()
+
+    if hits:
+        table = Table(
+            title=f"📄 {len(hits)} documents found",
+            title_style="bold yellow",
+            border_style="yellow",
+            padding=(0, 1),
+        )
+        table.add_column("#", style="bold white", width=3)
+        table.add_column("Document", style="bold cyan")
+        table.add_column("Preview", style="dim italic", max_width=50)
+        for i, hit in enumerate(hits[:10], 1):
+            table.add_row(str(i), hit["name"], hit["preview"][:100])
+        console.print(Padding(table, (0, 2)))
+    else:
+        console.print("  [dim]No documents found matching the query.[/dim]")
+
+    console.print()
+    console.print(Rule(style="dim"))
+
+
+def display_meeting_response(mission_id: str, label: str, meetings: list) -> None:
+    """Render Meeting Insights API results in spacecraft style."""
+    now = datetime.now().strftime("%I:%M %p")
+    console.print()
+    console.print(Rule(f"[bold green]🎙 {label} — {now}[/bold green]", style="green"))
+    console.print()
+
+    if not meetings:
+        console.print("  [dim]No recent meetings with insights found.[/dim]")
+        console.print(Rule(style="dim"))
+        return
+
+    for mtg in meetings:
+        console.print(f"  [bold white]📅 {mtg['subject']}[/bold white]")
+
+        if mtg["action_items"]:
+            console.print("  [bold yellow]  Action Items:[/bold yellow]")
+            for item in mtg["action_items"]:
+                console.print(f"    [yellow]→[/yellow] {item}")
+
+        if mtg["notes"]:
+            console.print("  [dim]  Notes:[/dim]")
+            for note in mtg["notes"][:3]:
+                console.print(f"    [dim]• {note[:100]}[/dim]")
+
+        if mtg["mentions"]:
+            console.print("  [cyan]  You were mentioned:[/cyan]")
+            for m in mtg["mentions"][:3]:
+                console.print(f"    [cyan]💬[/cyan] {m['speaker']}: \"{m['utterance'][:80]}\"")
+
+        console.print()
+
+    console.print(Rule(style="dim"))
+
+
 def display_scheduled_tasks(scheduler: Scheduler) -> None:
     """Show the list of registered scheduled tasks and their status."""
     tasks = scheduler.list_tasks()
-    console.print(Rule("[bold cyan]📅 Scheduled Tasks[/bold cyan]", style="cyan"))
+    console.print(Rule("[bold cyan]📅 Scheduled Missions[/bold cyan]", style="cyan"))
     console.print()
     table = Table(border_style="cyan", padding=(0, 1), show_lines=True)
-    table.add_column("Task", style="bold cyan")
+    table.add_column("Mission", style="bold cyan")
     table.add_column("Description", style="dim")
     table.add_column("Every", style="green", justify="center")
     table.add_column("Status", justify="center")
@@ -361,6 +601,7 @@ async def run_due_scheduled_tasks(scheduler: Scheduler) -> bool:
         return False
 
     for task in due_tasks:
+        sounds.mission_start()
         with console.status(
             f"[bold cyan]🤔 {task.label}... {random_hal_quote()}",
             spinner="dots",
@@ -377,9 +618,11 @@ async def run_due_scheduled_tasks(scheduler: Scheduler) -> bool:
                         )
                 result = future.result()
                 scheduler.mark_complete(task.name)
+                sounds.mission_complete()
                 task.display_fn(result)
             except Exception as e:
-                scheduler.mark_complete(task.name)  # don't retry immediately
+                scheduler.mark_complete(task.name)
+                sounds.mission_error()
                 console.print(f"[bold red]Scheduled task '{task.name}' failed:[/bold red] {e}")
 
     return True
@@ -436,22 +679,29 @@ async def main():
     # ── Boot sequence ────────────────────────────────────────────
     await boot_sequence()
 
-    # ── Authenticate ─────────────────────────────────────────────
+    # ── Authenticate + Initialize Brain ──────────────────────────
     console.print("[bold yellow]  ▸ Establishing secure link to Microsoft 365...[/bold yellow]")
     try:
-        graph_client = create_graph_client()
-        user = await graph_client.me.get()
-        name = user.display_name
-        email = user.mail or user.user_principal_name
+        # MSAL: tries silent (cached) first, then interactive browser
+        token = acquire_token()
+        brain = Brain()
+        # Verify connection by starting a Copilot conversation
+        await brain._ensure_conversation()
+        sounds.auth_success()
         console.print(
-            f"  [green]●[/green] [bold green]CREW AUTHENTICATED[/bold green]  "
-            f"[bold white]{name}[/bold white]  [dim]<{email}>[/dim]"
+            "  [green]●[/green] [bold green]CREW AUTHENTICATED[/bold green]  "
+            "[dim]Token cached for silent refresh[/dim]"
         )
     except Exception as e:
+        sounds.auth_fail()
         console.print(f"  [red]●[/red] [bold red]AUTHENTICATION FAULT:[/bold red] {e}")
         sys.exit(1)
 
-    agent = Agent(graph_client)
+    console.print(
+        "  [green]●[/green] [bold green]COPILOT BRAIN ONLINE[/bold green]  "
+        "[dim]Search · Retrieval · Chat · Meeting Insights[/dim]"
+    )
+
     console.print()
     console.print("[bold red]█[/bold red]" * 60, highlight=False)
     console.print()
@@ -460,112 +710,205 @@ async def main():
         "[dim]— Good morning, Dave. I'm ready for duty.[/dim]"
     )
     console.print(
-        "[dim]  Type commands at the HAL > prompt. "
-        "System checks run continuously.[/dim]"
+        "[dim]  Press Enter to chat with HAL. "
+        "System scans run automatically.[/dim]"
     )
     console.print()
     console.print(Rule("[bold green]🛰  DISCOVERY ONE — ALL SYSTEMS NOMINAL[/bold green]", style="green"))
     console.print()
 
-    # ── Set up scheduler ─────────────────────────────────────────
+    # ── Set up scheduler with Copilot missions ───────────────────
     scheduler = Scheduler()
 
-    # Register scheduled tasks (add more here as needed)
-    scheduler.register(
-        name="email-scan",
-        label="Scanning Discovery One inbox",
-        interval=SCHEDULE_INTERVAL,
-        run_fn=agent.mail.scan_todays_emails,
-        display_fn=display_email_scan,
-    )
+    for mission in MISSIONS:
+        mid = mission["id"]
+        mcode = mission.get("code", "SYS")
+        mlabel = mission["label"]
+        mtype = mission["type"]
+
+        # Build run_fn and display_fn based on mission type
+        if mtype == "chat":
+            mprompt = mission["prompt"]
+            async def make_run_fn(p=mprompt):
+                return await brain.ask(p)
+            def make_display_fn(m_id=mid, m_label=mlabel):
+                def display(response):
+                    display_copilot_response(m_id, m_label, response)
+                return display
+            run_fn = make_run_fn
+            display_fn = make_display_fn()
+
+        elif mtype == "retrieval":
+            mquery = mission["query"]
+            mds = mission.get("data_source", "sharePoint")
+            minstr = mission.get("instruction")
+            async def make_run_fn(q=mquery, ds=mds, inst=minstr):
+                return await brain.retrieve_and_summarize(q, data_source=ds, instruction=inst)
+            def make_display_fn(m_id=mid, m_label=mlabel):
+                def display(result):
+                    display_retrieval_response(m_id, m_label, result)
+                return display
+            run_fn = make_run_fn
+            display_fn = make_display_fn()
+
+        elif mtype == "search":
+            mquery = mission["query"]
+            async def make_run_fn(q=mquery):
+                return await brain.search(q)
+            def make_display_fn(m_id=mid, m_label=mlabel):
+                def display(hits):
+                    display_search_response(m_id, m_label, hits)
+                return display
+            run_fn = make_run_fn
+            display_fn = make_display_fn()
+
+        elif mtype == "meeting":
+            async def make_run_fn():
+                return await brain.get_meeting_insights()
+            def make_display_fn(m_id=mid, m_label=mlabel):
+                def display(meetings):
+                    display_meeting_response(m_id, m_label, meetings)
+                return display
+            run_fn = make_run_fn
+            display_fn = make_display_fn()
+
+        else:
+            continue
+
+        interval = mission["interval"] if mission["interval"] > 0 else SCHEDULE_INTERVAL
+        scheduler.register(
+            name=mid,
+            label=f"[{mcode}] {mlabel}",
+            interval=interval,
+            run_fn=run_fn,
+            display_fn=display_fn,
+            enabled=True,
+        )
 
     # ── Run all scheduled tasks immediately on startup ───────────
     scheduler.reset_all()
     await run_due_scheduled_tasks(scheduler)
 
-    # ── Main loop: idle spinner + scheduler + user commands ──────
-    session = PromptSession(
-        history=InMemoryHistory(),
-        auto_suggest=AutoSuggestFromHistory(),
-    )
-
+    # ── Main loop: scheduler runs, ESC interrupts for user input ──
     while True:
-        # Start idle spinner (also checks scheduler in background)
+        # Start system checks + scheduler in the background
         stop_thinking = asyncio.Event()
         idle_task = asyncio.create_task(
             idle_with_scheduler(scheduler, stop_thinking)
         )
 
         try:
-            command = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: session.prompt("HAL > ")
+            # Wait for user to press Enter (interrupts the scheduler)
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: input()
             )
         except (KeyboardInterrupt, EOFError):
             stop_thinking.set()
             await idle_task
             console.print()
+            sounds.goodbye()
             console.print(Rule(style="red"))
             console.print(
                 "[bold red]  HAL 9000:[/bold red] [italic]Daisy, Daisy, "
                 "give me your answer do... Goodbye, Dave.[/italic]"
             )
             console.print(Rule(style="red"))
+            await brain.close()
             break
 
-        # User typed something — stop the idle/scheduler loop
+        # User pressed Enter — pause scheduler, show prompt
         stop_thinking.set()
         await idle_task
 
-        if not command.strip():
-            continue
-
-        # Handle exit
-        if command.strip().lower() in ("exit", "quit"):
-            console.print()
-            console.print(Rule(style="red"))
-            console.print(
-                "[bold red]  HAL 9000:[/bold red] [italic]This mission is too important "
-                "for me to allow you to jeopardize it... Just kidding. Goodbye, Dave.[/italic]"
-            )
-            console.print(Rule(style="red"))
-            break
-
-        # Handle scan shortcut (force re-run email scan now)
-        if command.strip().lower() == "scan":
-            scheduler.reset_all()
-            await run_due_scheduled_tasks(scheduler)
-            continue
-
-        # Show scheduled task status
-        if command.strip().lower() == "schedule":
-            display_scheduled_tasks(scheduler)
-            continue
-
-        # Handle any other command with a thinking spinner
-        done = asyncio.Event()
-
-        async def run_command():
-            try:
-                await agent.handle(command)
-            finally:
-                done.set()
-
-        cmd_task = asyncio.create_task(run_command())
-        with console.status(
-            f"[bold cyan]🤔 {random_hal_quote()}",
-            spinner="dots",
-            spinner_style="cyan",
-        ) as status:
-            while not done.is_set():
-                await asyncio.sleep(3.0)
-                if not done.is_set():
-                    status.update(f"[bold cyan]🤔 {random_hal_quote()}")
-        await cmd_task
+        sounds.user_interrupt()
+        console.print()
+        console.print(Rule("[bold yellow]⌨  CREW INPUT MODE[/bold yellow]", style="yellow"))
+        console.print(
+            "[dim]  Type your question and press Enter. "
+            "10 seconds of silence returns to auto-pilot.[/dim]"
+        )
         console.print()
 
-        # After user command, force all scheduled tasks to re-run
-        scheduler.reset_all()
-        await run_due_scheduled_tasks(scheduler)
+        # ── User input loop with 10s timeout ─────────────────────
+        while True:
+            try:
+                # Prompt with 10 second timeout
+                user_input = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, lambda: input("  HAL > ")
+                    ),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                console.print()
+                sounds.resume()
+                console.print(
+                    "[dim]  ⏱  No input for 10 seconds — "
+                    "returning to auto-pilot...[/dim]"
+                )
+                console.print(Rule("[bold cyan]🛰  RESUMING SCHEDULED OPERATIONS[/bold cyan]", style="cyan"))
+                break
+            except (KeyboardInterrupt, EOFError):
+                console.print()
+                console.print(Rule(style="red"))
+                console.print(
+                    "[bold red]  HAL 9000:[/bold red] [italic]This mission is too important "
+                    "for me to allow you to jeopardize it... Just kidding. Goodbye, Dave.[/italic]"
+                )
+                console.print(Rule(style="red"))
+                await brain.close()
+                return
+
+            if not user_input.strip():
+                continue
+
+            cmd = user_input.strip()
+
+            # Handle exit
+            if cmd.lower() in ("exit", "quit"):
+                console.print()
+                sounds.goodbye()
+                console.print(Rule(style="red"))
+                console.print(
+                    "[bold red]  HAL 9000:[/bold red] [italic]This mission is too important "
+                    "for me to allow you to jeopardize it... Just kidding. Goodbye, Dave.[/italic]"
+                )
+                console.print(Rule(style="red"))
+                await brain.close()
+                return
+
+            # "scan" → force re-run all missions
+            if cmd.lower() == "scan":
+                scheduler.reset_all()
+                await run_due_scheduled_tasks(scheduler)
+                continue
+
+            # "missions" → show scheduled task status
+            if cmd.lower() == "missions":
+                display_scheduled_tasks(scheduler)
+                continue
+
+            # "reset" → fresh Copilot conversation
+            if cmd.lower() == "reset":
+                await brain.new_conversation()
+                sounds.mission_complete()
+                console.print("  [green]●[/green] [bold green]Copilot conversation reset.[/bold green]")
+                continue
+
+            # Everything else → natural language chat via Search + Chat API
+            sounds.mission_start()
+            with console.status(
+                f"[bold cyan]🔍 Searching M365... {random_hal_quote()}",
+                spinner="dots", spinner_style="cyan",
+            ) as status:
+                try:
+                    status.update(f"[bold cyan]🔍 Searching documents... {random_hal_quote()}")
+                    result = await brain.search_and_ask(cmd)
+                    sounds.mission_complete()
+                    display_search_and_ask(result, cmd)
+                except Exception as e:
+                    sounds.mission_error()
+                    console.print(f"[bold red]  ✗ Copilot error:[/bold red] {e}")
 
 
 if __name__ == "__main__":
