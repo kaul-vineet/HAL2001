@@ -1,16 +1,21 @@
-"""HAL Brain — M365 Copilot Search + Chat + Meeting Insights API.
+"""HAL Brain — M365 Copilot APIs + Orchestrator.
 
-Search API:           Semantic search across OneDrive/SharePoint content.
-Chat API:             Natural language Q&A grounded in M365 data.
-Meeting Insights API: AI-generated summaries, action items from Teams meetings.
+The Brain serves two roles:
+1. Direct tool execution (chat, search, retrieval, meeting insights)
+2. Orchestrated execution via plan_and_execute() — the LLM plans which
+   tools to call, HAL executes the plan deterministically.
 
 Requires: M365 Copilot license per user.
 """
 
+import json
 import re
+import time
 import httpx
 
 from src.auth import acquire_token
+from src.orchestrator import build_planner_prompt
+from src import audit
 
 GRAPH_BASE = "https://graph.microsoft.com/beta"
 GRAPH_V1 = "https://graph.microsoft.com/v1.0"
@@ -378,3 +383,228 @@ class Brain:
     async def close(self) -> None:
         if self._http and not self._http.is_closed:
             await self._http.aclose()
+
+    # ── Orchestrated execution ───────────────────────────────────
+
+    async def plan_and_execute(
+        self,
+        prompt: str,
+        mcp_hub=None,
+        mcp_tools: dict = None,
+        source: str = "mission",
+    ) -> dict:
+        """The full orchestrated flow with audit logging.
+
+        1. Send prompt to Copilot Chat API as a PLANNER
+        2. Parse the JSON plan (which tools, what order)
+        3. Execute each step deterministically
+        4. Log everything for audit
+
+        Returns:
+            dict with 'reasoning', 'steps', 'final_answer', 'execution_id'.
+        """
+        execution_start = time.monotonic()
+
+        # Build the planner prompt with dynamic tool registry
+        planner_prompt = build_planner_prompt(prompt, mcp_tools or {})
+
+        # Step 1: Ask Copilot to plan (uses a separate conversation)
+        old_conv = self._conversation_id
+        self._conversation_id = None
+        try:
+            plan_text = await self.ask(planner_prompt)
+        finally:
+            self._conversation_id = old_conv
+
+        # Step 2: Parse the JSON plan
+        plan_data = self._parse_plan(plan_text)
+        if not plan_data:
+            fallback_answer = await self.ask(prompt)
+            execution_id = audit.log_plan(
+                prompt=prompt,
+                reasoning="Planner returned non-JSON; fell back to direct chat.",
+                plan=[{"step": 1, "tool": "chat", "description": "Direct fallback"}],
+                source=source,
+            )
+            audit.log_result(
+                execution_id=execution_id,
+                prompt=prompt,
+                final_answer=fallback_answer,
+                total_steps=1, steps_ok=1, steps_failed=0,
+                total_duration_ms=int((time.monotonic() - execution_start) * 1000),
+            )
+            return {
+                "reasoning": "Planner returned non-JSON; fell back to direct chat.",
+                "steps": [],
+                "final_answer": fallback_answer,
+                "execution_id": execution_id,
+            }
+
+        reasoning = plan_data.get("reasoning", "")
+        steps = plan_data.get("plan", [])
+
+        # Log the plan
+        execution_id = audit.log_plan(
+            prompt=prompt,
+            reasoning=reasoning,
+            plan=steps,
+            source=source,
+        )
+
+        # Step 3: Execute each step with timing and logging
+        step_results = {}
+        steps_ok = 0
+        steps_failed = 0
+
+        for step in steps:
+            step_num = step.get("step", 0)
+            tool = step.get("tool", "")
+            args = step.get("args", {})
+            description = step.get("description", "")
+
+            args = self._resolve_refs(args, step_results)
+            step_start = time.monotonic()
+
+            try:
+                if tool == "chat":
+                    result = await self.ask(args.get("query", prompt))
+                elif tool == "search":
+                    result = await self.search(args.get("query", prompt))
+                elif tool == "retrieval":
+                    result = await self.retrieve(
+                        args.get("query", prompt),
+                        data_source=args.get("data_source", "sharePoint"),
+                    )
+                elif tool == "meeting":
+                    result = await self.get_meeting_insights()
+                elif "." in tool and mcp_hub:
+                    server_name, tool_name = tool.split(".", 1)
+                    result = await mcp_hub.call(server_name, tool_name, args)
+                else:
+                    result = f"Unknown tool: {tool}"
+
+                step_ms = int((time.monotonic() - step_start) * 1000)
+                step_results[step_num] = {
+                    "tool": tool,
+                    "description": description,
+                    "result": result,
+                    "status": "ok",
+                    "duration_ms": step_ms,
+                }
+                steps_ok += 1
+
+                audit.log_step(
+                    execution_id=execution_id,
+                    step=step_num, tool=tool, description=description,
+                    status="ok", duration_ms=step_ms,
+                    result_preview=str(result)[:500],
+                )
+
+            except Exception as e:
+                step_ms = int((time.monotonic() - step_start) * 1000)
+                step_results[step_num] = {
+                    "tool": tool,
+                    "description": description,
+                    "result": str(e),
+                    "status": "error",
+                    "duration_ms": step_ms,
+                }
+                steps_failed += 1
+
+                audit.log_step(
+                    execution_id=execution_id,
+                    step=step_num, tool=tool, description=description,
+                    status="error", duration_ms=step_ms,
+                    result_preview=str(e)[:500],
+                )
+
+        # Find the final answer
+        final_answer = ""
+        for s in reversed(sorted(step_results.keys())):
+            sr = step_results[s]
+            if sr["status"] == "ok" and isinstance(sr["result"], str):
+                final_answer = sr["result"]
+                break
+
+        if not final_answer:
+            parts = []
+            for s in sorted(step_results.keys()):
+                sr = step_results[s]
+                parts.append(f"[{sr['tool']}] {sr['result']}")
+            final_answer = "\n".join(parts)
+
+        total_ms = int((time.monotonic() - execution_start) * 1000)
+
+        # Log the final result
+        audit.log_result(
+            execution_id=execution_id,
+            prompt=prompt,
+            final_answer=_clean_response(final_answer) if isinstance(final_answer, str) else str(final_answer),
+            total_steps=len(step_results),
+            steps_ok=steps_ok,
+            steps_failed=steps_failed,
+            total_duration_ms=total_ms,
+        )
+
+        return {
+            "reasoning": reasoning,
+            "steps": [
+                {
+                    "step": k,
+                    "tool": v["tool"],
+                    "description": v["description"],
+                    "status": v["status"],
+                    "duration_ms": v.get("duration_ms", 0),
+                    "result_preview": str(v["result"])[:200],
+                }
+                for k, v in sorted(step_results.items())
+            ],
+            "final_answer": _clean_response(final_answer) if isinstance(final_answer, str) else str(final_answer),
+            "execution_id": execution_id,
+            "total_duration_ms": total_ms,
+        }
+
+    def _parse_plan(self, text: str) -> dict | None:
+        """Extract JSON plan from planner response (handles markdown fences)."""
+        # Try direct parse
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Try extracting from ```json ... ``` blocks
+        match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Try finding first { ... } in the text
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return None
+
+    def _resolve_refs(self, args: dict, step_results: dict) -> dict:
+        """Replace {{step_N}} references in args with actual results."""
+        resolved = {}
+        for key, value in args.items():
+            if isinstance(value, str):
+                for step_num, sr in step_results.items():
+                    placeholder = f"{{{{step_{step_num}}}}}"
+                    if placeholder in value:
+                        result_str = (
+                            str(sr["result"])[:500]
+                            if sr["status"] == "ok"
+                            else f"[{sr['tool']} failed: {sr['result']}]"
+                        )
+                        value = value.replace(placeholder, result_str)
+                resolved[key] = value
+            else:
+                resolved[key] = value
+        return resolved

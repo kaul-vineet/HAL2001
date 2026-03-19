@@ -18,6 +18,7 @@ from src.scheduler import Scheduler
 from src.missions import MISSIONS
 from src.mcp_client import MCPHub
 from src.mcp_servers import MCP_SERVERS
+from src.audit import display_audit_trail
 from src import sounds
 
 console = Console()
@@ -301,6 +302,53 @@ async def run_system_checks(stop_event: asyncio.Event) -> None:
 
 
 # ── Display helpers ──────────────────────────────────────────────
+
+
+def display_orchestrated_response(mission_id: str, label: str, result: dict) -> None:
+    """Render an orchestrated plan + result in spacecraft style with audit trail."""
+    now = datetime.now().strftime("%I:%M %p")
+    reasoning = result.get("reasoning", "")
+    steps = result.get("steps", [])
+    final_answer = result.get("final_answer", "")
+    execution_id = result.get("execution_id", "")
+    total_ms = result.get("total_duration_ms", 0)
+
+    console.print()
+    console.print(Rule(f"[bold cyan]🛰 {label} — {now}[/bold cyan]", style="cyan"))
+
+    # Show reasoning
+    if reasoning:
+        console.print(f"  [dim italic]🧠 Planner: {reasoning}[/dim italic]")
+        console.print()
+
+    # Show execution steps with timing
+    if steps:
+        for s in steps:
+            status_icon = "[green]✓[/green]" if s["status"] == "ok" else "[red]✗[/red]"
+            duration = f"[dim]{s.get('duration_ms', 0)}ms[/dim]"
+            console.print(
+                f"  {status_icon} Step {s['step']}: "
+                f"[bold cyan]{s['tool']}[/bold cyan]  "
+                f"[dim]{s['description']}[/dim]  {duration}"
+            )
+        console.print()
+
+    # Show final answer
+    if final_answer:
+        console.print(
+            Panel(
+                final_answer,
+                title=f"[bold white]COPILOT ▸ {mission_id}[/bold white]",
+                border_style="cyan",
+                padding=(1, 2),
+            )
+        )
+
+    # Show audit trail
+    if execution_id:
+        display_audit_trail(result, execution_id)
+    else:
+        console.print(Rule(style="dim"))
 
 
 def display_copilot_response(mission_id: str, label: str, response: str) -> None:
@@ -650,210 +698,211 @@ async def main():
                     )
         console.print()
 
-    # ── Set up scheduler with Copilot missions ───────────────────
-    scheduler = Scheduler()
+    # ── Launch Command Center Dashboard ─────────────────────────
+    from src.dashboard import Dashboard
+    import msvcrt
 
+    dashboard = Dashboard(MISSIONS)
+    mcp_tools = await mcp_hub.list_all_tools() if mcp_hub.is_connected else {}
+
+    # Register missions with scheduler
+    scheduler = Scheduler()
     for mission in MISSIONS:
         mid = mission["id"]
         mcode = mission.get("code", "SYS")
-        mlabel = mission["label"]
-        mtype = mission["type"]
+        mprompt = mission["prompt"]
+        mtype = mission.get("type", "smart")
 
-        # Build run_fn and display_fn based on mission type
-        if mtype == "chat":
-            mprompt = mission["prompt"]
+        if mtype == "smart":
+            async def make_run_fn(p=mprompt, mt=mcp_tools):
+                return await brain.plan_and_execute(p, mcp_hub=mcp_hub, mcp_tools=mt)
+        else:
             async def make_run_fn(p=mprompt):
                 return await brain.ask(p)
-            def make_display_fn(m_id=mid, m_label=mlabel):
-                def display(response):
-                    display_copilot_response(m_id, m_label, response)
-                return display
-            run_fn = make_run_fn
-            display_fn = make_display_fn()
-
-        elif mtype == "retrieval":
-            mquery = mission["query"]
-            mds = mission.get("data_source", "sharePoint")
-            minstr = mission.get("instruction")
-            async def make_run_fn(q=mquery, ds=mds, inst=minstr):
-                return await brain.retrieve_and_summarize(q, data_source=ds, instruction=inst)
-            def make_display_fn(m_id=mid, m_label=mlabel):
-                def display(result):
-                    display_retrieval_response(m_id, m_label, result)
-                return display
-            run_fn = make_run_fn
-            display_fn = make_display_fn()
-
-        elif mtype == "search":
-            mquery = mission["query"]
-            async def make_run_fn(q=mquery):
-                return await brain.search(q)
-            def make_display_fn(m_id=mid, m_label=mlabel):
-                def display(hits):
-                    display_search_response(m_id, m_label, hits)
-                return display
-            run_fn = make_run_fn
-            display_fn = make_display_fn()
-
-        elif mtype == "meeting":
-            async def make_run_fn():
-                return await brain.get_meeting_insights()
-            def make_display_fn(m_id=mid, m_label=mlabel):
-                def display(meetings):
-                    display_meeting_response(m_id, m_label, meetings)
-                return display
-            run_fn = make_run_fn
-            display_fn = make_display_fn()
-
-        else:
-            continue
 
         interval = mission["interval"] if mission["interval"] > 0 else SCHEDULE_INTERVAL
         scheduler.register(
             name=mid,
-            label=f"[{mcode}] {mlabel}",
+            label=f"[{mcode}] {mission['label']}",
             interval=interval,
-            run_fn=run_fn,
-            display_fn=display_fn,
+            run_fn=make_run_fn,
+            display_fn=lambda r: None,
             enabled=True,
         )
 
-    # ── Run all scheduled tasks immediately on startup ───────────
-    scheduler.reset_all()
-    await run_due_scheduled_tasks(scheduler)
+    async def run_all_missions():
+        """Run all due missions and update dashboard panels."""
+        due_tasks = scheduler.get_due_tasks()
+        if not due_tasks:
+            return
 
-    # ── Main loop: scheduler runs, ESC interrupts for user input ──
-    while True:
-        # Start system checks + scheduler in the background
-        stop_thinking = asyncio.Event()
-        idle_task = asyncio.create_task(
-            idle_with_scheduler(scheduler, stop_thinking)
-        )
+        ok_count = 0
+        fail_count = 0
 
-        try:
-            # Wait for user to press any key (Enter or Escape)
-            import msvcrt
-
-            def wait_for_key():
-                """Block until user presses Enter or Escape."""
-                while True:
-                    if msvcrt.kbhit():
-                        key = msvcrt.getch()
-                        if key == b'\x1b':  # Escape
-                            return "escape"
-                        if key == b'\r' or key == b'\n':  # Enter
-                            return "enter"
-
-            key_result = await asyncio.get_event_loop().run_in_executor(
-                None, wait_for_key
-            )
-        except (KeyboardInterrupt, EOFError):
-            stop_thinking.set()
-            await idle_task
-            console.print()
-            sounds.goodbye()
-            console.print(Rule(style="red"))
-            console.print(
-                "[bold red]  HAL 9000:[/bold red] [italic]Daisy, Daisy, "
-                "give me your answer do... Goodbye, Dave.[/italic]"
-            )
-            console.print(Rule(style="red"))
-            await brain.close()
-            break
-
-        # User pressed Enter — pause scheduler, show prompt
-        stop_thinking.set()
-        await idle_task
-
-        sounds.user_interrupt()
-        console.print()
-        console.print(Rule("[bold yellow]⌨  CREW INPUT MODE[/bold yellow]", style="yellow"))
-        console.print(
-            "[dim]  Type your question and press Enter. "
-            "10 seconds of silence returns to auto-pilot.[/dim]"
-        )
-        console.print()
-
-        # ── User input loop with 10s timeout ─────────────────────
-        while True:
-            try:
-                # Prompt with 10 second timeout
-                user_input = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        None, lambda: input("  HAL > ")
-                    ),
-                    timeout=10.0,
-                )
-            except asyncio.TimeoutError:
-                console.print()
-                sounds.resume()
-                console.print(
-                    "[dim]  ⏱  No input for 10 seconds — "
-                    "returning to auto-pilot...[/dim]"
-                )
-                console.print(Rule("[bold cyan]🛰  RESUMING SCHEDULED OPERATIONS[/bold cyan]", style="cyan"))
-                break
-            except (KeyboardInterrupt, EOFError):
-                console.print()
-                console.print(Rule(style="red"))
-                console.print(
-                    "[bold red]  HAL 9000:[/bold red] [italic]This mission is too important "
-                    "for me to allow you to jeopardize it... Just kidding. Goodbye, Dave.[/italic]"
-                )
-                console.print(Rule(style="red"))
-                await brain.close()
-                return
-
-            if not user_input.strip():
-                continue
-
-            cmd = user_input.strip()
-
-            # Handle exit
-            if cmd.lower() in ("exit", "quit"):
-                console.print()
-                sounds.goodbye()
-                console.print(Rule(style="red"))
-                console.print(
-                    "[bold red]  HAL 9000:[/bold red] [italic]This mission is too important "
-                    "for me to allow you to jeopardize it... Just kidding. Goodbye, Dave.[/italic]"
-                )
-                console.print(Rule(style="red"))
-                await brain.close()
-                return
-
-            # "scan" → force re-run all missions
-            if cmd.lower() == "scan":
-                scheduler.reset_all()
-                await run_due_scheduled_tasks(scheduler)
-                continue
-
-            # "missions" → show scheduled task status
-            if cmd.lower() == "missions":
-                display_scheduled_tasks(scheduler)
-                continue
-
-            # "reset" → fresh Copilot conversation
-            if cmd.lower() == "reset":
-                await brain.new_conversation()
-                sounds.mission_complete()
-                console.print("  [green]●[/green] [bold green]Copilot conversation reset.[/bold green]")
-                continue
-
-            # Everything else → natural language chat via Search + Chat API
+        for task in due_tasks:
             sounds.mission_start()
-            with console.status(
-                f"[bold cyan]🔍 Searching M365... {random_hal_quote()}",
-                spinner="dots", spinner_style="cyan",
-            ) as status:
-                try:
-                    status.update(f"[bold cyan]🔍 Searching documents... {random_hal_quote()}")
-                    result = await brain.search_and_ask(cmd)
-                    sounds.mission_complete()
-                    display_search_and_ask(result, cmd)
-                except Exception as e:
-                    sounds.mission_error()
-                    console.print(f"[bold red]  ✗ Copilot error:[/bold red] {e}")
+            dashboard.update_panel(task.name, "🔄 Scanning...", "pending")
+            dashboard.refresh()
+            try:
+                result = await task.run_fn()
+                scheduler.mark_complete(task.name)
+                sounds.mission_complete()
+
+                if isinstance(result, dict):
+                    answer = result.get("final_answer", str(result))
+                    if task.name == "daily-briefing":
+                        dashboard.set_briefing(answer)
+                    dashboard.update_panel(task.name, answer, "ok")
+                elif isinstance(result, str):
+                    dashboard.update_panel(task.name, result, "ok")
+                else:
+                    dashboard.update_panel(task.name, str(result)[:200], "ok")
+                ok_count += 1
+
+            except Exception as e:
+                scheduler.mark_complete(task.name)
+                sounds.mission_error()
+                dashboard.update_panel(task.name, str(e)[:100], "error")
+                fail_count += 1
+
+            dashboard.refresh()
+
+        total = ok_count + fail_count
+        dashboard.set_audit_summary(
+            f"📋 {total} tools, {ok_count} ok, {fail_count} failed"
+        )
+        dashboard.refresh()
+
+    # Start dashboard, then run initial missions in background
+    live = dashboard.start_live()
+    live.start()
+    dashboard.set_status("🔄 First scan...")
+    dashboard.refresh()
+
+    scheduler.reset_all()
+    mission_task = asyncio.create_task(run_all_missions())
+
+    try:
+        while True:
+            # Let pending async tasks (like missions) run
+            await asyncio.sleep(0.5)
+
+            # Update quote rotation
+            dashboard.set_quote(random_hal_quote())
+
+            # If initial mission task is done, check scheduler for future runs
+            if mission_task.done():
+                due = scheduler.get_due_tasks()
+                if due:
+                    dashboard.set_status("🔄 Scanning...")
+                    dashboard.refresh()
+                    mission_task = asyncio.create_task(run_all_missions())
+
+                # Calculate next scan time
+                next_in = 999
+                for t in scheduler.list_tasks():
+                    if t["next_in_seconds"] < next_in:
+                        next_in = t["next_in_seconds"]
+                dashboard.set_status(f"🔄 Next: {next_in}s")
+
+            dashboard.refresh()
+
+            # Check for user input (non-blocking)
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+
+                if key == b'\x1b' or key == b'\x03':  # ESC or Ctrl+C
+                    break
+
+                # User started typing — collect full input
+                live.stop()
+                sounds.user_interrupt()
+                console.print()
+                console.print(
+                    "[bold red]🔴 Talk to me, Dave ▸[/bold red] ",
+                    end="",
+                )
+
+                # Show the first character they typed
+                first_char = key.decode("utf-8", errors="ignore")
+                user_input = input(first_char)
+                cmd = (first_char + user_input).strip()
+
+                if cmd:
+                    if cmd.lower() in ("exit", "quit"):
+                        sounds.goodbye()
+                        console.print(
+                            "\n[bold red]  HAL 9000:[/bold red] [italic]"
+                            "Goodbye, Dave.[/italic]\n"
+                        )
+                        await brain.close()
+                        return
+
+                    if cmd.lower() == "reset":
+                        await brain.new_conversation()
+                        sounds.mission_complete()
+                        console.print("[green]  ● Copilot conversation reset.[/green]")
+
+                    elif cmd.lower() == "scan":
+                        scheduler.reset_all()
+                        live.start()
+                        await run_all_missions()
+                        continue
+
+                    else:
+                        # Orchestrated query
+                        sounds.mission_start()
+                        console.print(f"[dim]  🛰 Planning...[/dim]")
+                        try:
+                            result = await brain.plan_and_execute(
+                                cmd, mcp_hub=mcp_hub, mcp_tools=mcp_tools,
+                                source="user",
+                            )
+                            sounds.mission_complete()
+                            answer = result.get("final_answer", "")
+                            reasoning = result.get("reasoning", "")
+                            steps = result.get("steps", [])
+
+                            if reasoning:
+                                console.print(f"  [dim italic]🧠 {reasoning}[/dim italic]")
+                            for s in steps:
+                                icon = "[green]✓[/green]" if s["status"] == "ok" else "[red]✗[/red]"
+                                console.print(
+                                    f"  {icon} {s['tool']} "
+                                    f"[dim]{s.get('duration_ms', 0)}ms[/dim]"
+                                )
+                            console.print()
+                            console.print(Panel(
+                                answer,
+                                title="[bold white]🧠 HAL RESPONSE[/bold white]",
+                                border_style="cyan",
+                                padding=(1, 2),
+                            ))
+
+                            # Also update dashboard response panel
+                            dashboard.set_response(answer)
+
+                        except Exception as e:
+                            sounds.mission_error()
+                            console.print(f"[bold red]  ✗ Error: {e}[/bold red]")
+
+                console.print("\n[dim]  Press any key to return to Command Center...[/dim]")
+                await asyncio.get_event_loop().run_in_executor(None, msvcrt.getch)
+                dashboard.clear_response()
+                live.start()
+
+            await asyncio.sleep(0.5)
+
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        live.stop()
+        sounds.goodbye()
+        console.print(
+            "\n[bold red]  HAL 9000:[/bold red] [italic]"
+            "Daisy, Daisy, give me your answer do... Goodbye, Dave.[/italic]\n"
+        )
+        await brain.close()
 
 
 if __name__ == "__main__":

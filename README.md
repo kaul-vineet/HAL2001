@@ -1,45 +1,173 @@
 # 🔴 HAL 9000 — M365 Copilot CLI Agent
 
-A spacecraft-themed autonomous CLI agent that connects to **Microsoft 365 Copilot APIs** (Chat, Search, Retrieval, Meeting Insights) to scan, summarize, and analyze your M365 data — emails, Teams, Planner, SharePoint, meetings — all from your terminal.
+A spacecraft-themed autonomous CLI agent that connects to **Microsoft 365 Copilot APIs** and **MCP servers** to scan, summarize, and analyze your enterprise data — emails, Teams, Planner, SharePoint, meetings, and external systems — all from a command center dashboard in your terminal.
 
 ## 🚀 How It Works
 
-HAL runs in two modes:
+HAL runs as a **fixed-grid command center dashboard** powered by Rich Live Layout. Each mission gets its own panel that updates in place — no scrolling.
 
-### 🛰️ Auto-Pilot Mode (default)
+- 🔄 **Scheduled missions** run every 30 seconds via the orchestrator
+- 🧠 **Copilot Chat API acts as the planner** — decides which tools to call
+- ⚡ **Panels flash yellow** when new data arrives, then fade back
+- 🔴 **"Talk to me, Dave"** prompt at the bottom — type any question anytime
 
-- 🔄 Runs scheduled **missions** every 30 seconds
-- 🧠 Each mission sends a prompt to M365 Copilot APIs
-- 📊 Results display in spacecraft-style UI with system sounds
-- ⚙️ Cosmetic system checks scroll between mission cycles
+## 🏗️ Architecture
 
-### ⌨️ Crew Input Mode (press ESC)
+### System Overview
 
-- 🛑 Press **ESC** to interrupt and ask HAL anything
-- 🔍 Your question goes through **Search API** (find docs) then **Chat API** (analyze)
-- ⏱️ 10 seconds of silence returns to auto-pilot
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  HAL 9000 (runs on your machine)                                │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ COMMAND CENTER DASHBOARD (Rich Live Layout)               │  │
+│  │ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐     │  │
+│  │ │ 📬 MAIL  │ │ 💬 TEAM  │ │ 🎙️ MEET  │ │ ✅ PLAN  │     │  │
+│  │ └──────────┘ └──────────┘ └──────────┘ └──────────┘     │  │
+│  │ 🔴 Talk to me, Dave ▸ _                                  │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│       │                                                         │
+│       ▼                                                         │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ SCHEDULER (scheduler.py)                                  │  │
+│  │ Fires missions every 30s from missions.py                 │  │
+│  └──────────────────────────┬────────────────────────────────┘  │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ ORCHESTRATOR (orchestrator.py)                            │  │
+│  │                                                           │  │
+│  │ Step 1: Send prompt + tool registry to Copilot Chat API   │  │
+│  │ Step 2: Copilot returns a JSON execution plan             │  │
+│  │ Step 3: HAL executes the plan step by step                │  │
+│  │ Step 4: Results logged to audit trail                     │  │
+│  └──────────────┬──────────────────────────┬─────────────────┘  │
+│                  │                          │                    │
+│    ┌─────────────▼──────────────┐  ┌───────▼────────────────┐   │
+│    │ COPILOT APIs (M365 data)   │  │ MCP SERVERS (external) │   │
+│    │                            │  │                        │   │
+│    │ 💬 Chat API                │  │ 🔧 GitHub              │   │
+│    │ 🔍 Search API              │  │ 📋 Jira                │   │
+│    │ 📄 Retrieval API           │  │ 💰 Salesforce          │   │
+│    │ 🎙️ Meeting Insights API    │  │ 🗄️ PostgreSQL          │   │
+│    └────────────────────────────┘  │ 💬 Slack               │   │
+│                                    └────────────────────────┘   │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ AUDIT LOG (logs/hal_audit.jsonl)                          │  │
+│  │ Every plan, tool call, result, and timing is logged       │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Orchestration: How Decisions Are Made
+
+HAL uses a **Plan-and-Execute** pattern where the LLM plans and code executes:
+
+```
+User/Mission: "Prepare for my 2pm sprint review"
+                    │
+                    ▼
+    ┌─── STEP 1: PLAN (1 Chat API call) ───┐
+    │                                       │
+    │  Copilot Chat API receives:           │
+    │  • The user's prompt                  │
+    │  • Full tool registry:                │
+    │    - chat, search, retrieval, meeting │
+    │    - jira.get_sprint, github.list_prs │
+    │  • Routing rules (when to use what)   │
+    │  • Output format (strict JSON)        │
+    │                                       │
+    │  Copilot returns:                     │
+    │  {                                    │
+    │    "reasoning": "Need meeting data    │
+    │     + Jira tickets + related docs",   │
+    │    "plan": [                          │
+    │      {"step":1, "tool":"meeting"},    │
+    │      {"step":2, "tool":"jira.get..."},│
+    │      {"step":3, "tool":"search"},     │
+    │      {"step":4, "tool":"chat",        │
+    │       "args": "Combine all above"}    │
+    │    ]                                  │
+    │  }                                    │
+    └───────────────┬───────────────────────┘
+                    │
+                    ▼
+    ┌─── STEP 2: EXECUTE (deterministic) ──┐
+    │                                       │
+    │  HAL runs each step in order:         │
+    │  ✓ Step 1: Meeting Insights API       │
+    │  ✓ Step 2: Jira MCP server            │
+    │  ✓ Step 3: Copilot Search API         │
+    │  ✓ Step 4: Chat API (merge results)   │
+    │                                       │
+    │  Each step is timed and logged.       │
+    └───────────────┬───────────────────────┘
+                    │
+                    ▼
+    ┌─── STEP 3: DISPLAY + AUDIT ──────────┐
+    │                                       │
+    │  Dashboard panel flashes ⚡ yellow     │
+    │  Audit log records: plan, reasoning,  │
+    │  each tool call, duration, result     │
+    └───────────────────────────────────────┘
+```
+
+### Decision Logic: Which Tool Gets Called
+
+The orchestrator prompt includes routing rules that tell the LLM which tool to use:
+
+| Data needed | Tool | Why |
+|-------------|------|-----|
+| Emails, calendar, Teams, tasks | `chat` | Copilot has live M365 data access |
+| Find specific documents | `search` | Returns real file names + URLs |
+| Exact text from a document | `retrieval` | Zero hallucination, verbatim quotes |
+| Meeting action items, notes | `meeting` | **Exclusive source** — only API with structured meeting data |
+| Jira tickets, GitHub PRs | MCP tool | **Exclusive source** — Copilot can't see external systems |
+| Combined answer from multiple tools | `chat` (final step) | LLM merges all tool results |
+
+**Key principle:** The LLM plans, code executes. The LLM never touches tools directly — HAL's executor handles all API calls, error handling, and retry logic.
+
+### Data Access Boundaries
+
+```
+┌─────────────────────────────┐  ┌──────────────────────────────┐
+│  COPILOT APIs               │  │  MCP SERVERS                 │
+│  (M365 data only)           │  │  (external systems only)     │
+│                             │  │                              │
+│  ✅ Emails                  │  │  ✅ Jira / Azure DevOps      │
+│  ✅ Calendar                │  │  ✅ GitHub / GitLab           │
+│  ✅ Teams messages          │  │  ✅ Salesforce / HubSpot     │
+│  ✅ Planner tasks           │  │  ✅ PostgreSQL / MongoDB     │
+│  ✅ SharePoint documents    │  │  ✅ Slack / Notion           │
+│  ✅ OneDrive files          │  │  ✅ Custom REST APIs         │
+│  ✅ Meeting transcripts     │  │                              │
+│  ✅ People directory        │  │  ❌ Cannot see M365 data     │
+│                             │  │                              │
+│  ❌ Cannot see Jira, GitHub │  │                              │
+│  ❌ Cannot see databases    │  │                              │
+└─────────────────────────────┘  └──────────────────────────────┘
+
+The orchestrator knows these boundaries and routes accordingly.
+```
 
 ## 🧠 Copilot APIs Used
 
 | API | Purpose | Endpoint |
 |-----|---------|----------|
-| 💬 **Chat API** | Natural language Q&A grounded in M365 data | `POST /beta/copilot/conversations/{id}/chat` |
+| 💬 **Chat API** | Natural language Q&A + orchestrator planner | `POST /beta/copilot/conversations/{id}/chat` |
 | 🔍 **Search API** | Semantic document discovery across OneDrive | `POST /beta/copilot/search` |
-| 📄 **Retrieval API** | Extract text chunks from SharePoint/OneDrive for RAG | `POST /beta/copilot/retrieval` |
-| 🎙️ **Meeting Insights API** | AI-generated notes, action items from Teams meetings | `GET /copilot/users/{id}/onlineMeetings/{id}/aiInsights` |
+| 📄 **Retrieval API** | Extract exact text chunks for RAG grounding | `POST /beta/copilot/retrieval` |
+| 🎙️ **Meeting Insights API** | AI-generated notes, action items, mentions | `GET /copilot/users/{id}/onlineMeetings/{id}/aiInsights` |
 
 ## 📋 Prerequisites
 
 - 🐍 **Python 3.10+**
 - 🪪 **Microsoft 365 Copilot license** (required for all Copilot APIs)
 - 🔐 **Azure AD App Registration** with these **delegated** permissions:
-  - `Mail.Read`
-  - `Chat.Read`
-  - `ChannelMessage.Read.All`
-  - `People.Read.All`
-  - `Sites.Read.All`
-  - `OnlineMeetingTranscript.Read.All`
-  - `ExternalItem.Read.All`
+  - `Mail.Read`, `Chat.Read`, `ChannelMessage.Read.All`
+  - `People.Read.All`, `Sites.Read.All`
+  - `OnlineMeetingTranscript.Read.All`, `ExternalItem.Read.All`
   - `Calendars.Read`
 
 ## ⚡ Setup
@@ -82,7 +210,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-🌐 First run opens a browser for login. Subsequent runs use cached tokens (silent refresh).
+🌐 First run opens a browser for login. Subsequent runs use cached tokens.
 
 ### 🔄 Force Re-login
 
@@ -92,23 +220,22 @@ python main.py --relogin
 
 ## 📡 Missions
 
-Missions are scheduled prompts sent to Copilot APIs. Edit `src/missions.py` to customize — no code changes needed elsewhere.
+Missions are scheduled prompts. The **orchestrator decides which tools to call** based on the prompt — you don't specify the tool type, just what you want to know. Edit `src/missions.py` to customize.
 
-| Code | Label | API | What it asks |
-|------|-------|-----|-------------|
-| 📬 `MAIL` | Outlook Inbox | Chat | Summarize emails with topic highlights |
-| 💬 `TEAM` | Teams | Chat | Summarize Teams messages and mentions |
-| 🎙️ `MEET` | Meeting Insights | Meeting API | Action items and notes from recent meetings |
-| ✅ `PLAN` | Planner Tasks | Chat | Overdue or due-today tasks |
-| 🔧 `ADO` | Azure DevOps | Chat | Work items in progress or blocked |
-| 📁 `SHRP` | SharePoint Docs | Chat | Recently modified documents |
-| 💰 `SALE` | Sales | Chat | Time-sensitive sales activity |
-| 📄 `PLCY` | Motor Control Brief | Retrieval | Extract and summarize from SharePoint docs |
-| 🛡️ `COMP` | Compliance | Retrieval | Compliance updates from org docs |
-| 📊 `PROJ` | Project Docs | Retrieval | Project status updates |
-| 📚 `KNOW` | Knowledge Base | Retrieval | New knowledge articles |
-| 🔍 `DOCS` | Recent Documents | Search | Find recently modified files |
-| ☀️ `BREF` | Daily Briefing | Chat | 4-line morning briefing (startup only) |
+| Code | Label | What it asks |
+|------|-------|-------------|
+| 📬 `MAIL` | Outlook Inbox | List emails with sender, subject, date |
+| 💬 `TEAM` | Teams | List messages with sender, channel, text |
+| 🎙️ `MEET` | Meeting Insights | Action items and notes from recent meetings |
+| ✅ `PLAN` | Planner Tasks | Overdue or due-today tasks |
+| 🔧 `ADO` | Azure DevOps | Work items in progress or blocked |
+| 📁 `SHRP` | SharePoint Docs | Recently modified documents |
+| 💰 `SALE` | Sales | Time-sensitive sales activity |
+| 📄 `PLCY` | Motor Control Brief | Extract and summarize from SharePoint docs |
+| 🛡️ `COMP` | Compliance | Compliance updates from org docs |
+| 📊 `PROJ` | Project Docs | Project status updates |
+| 📚 `KNOW` | Knowledge Base | New knowledge articles |
+| ☀️ `BREF` | Daily Briefing | Morning briefing with calendar, emails, tasks (startup only) |
 
 ### ➕ Adding a Mission
 
@@ -119,41 +246,47 @@ Add to `src/missions.py`:
     "id": "hr-updates",
     "code": "HR",
     "label": "HR Updates",
-    "type": "retrieval",
-    "query": "HR announcements benefits changes",
-    "data_source": "sharePoint",
-    "instruction": "In ONE line: any HR updates this week?",
+    "type": "smart",
+    "prompt": "List any HR announcements or policy changes from the last 30 days.",
     "interval": 30,
 },
 ```
 
-## 💻 User Commands (in Crew Input Mode)
+The orchestrator automatically decides whether to use Chat, Search, Retrieval, or MCP tools.
 
-| Command | Action |
-|---------|--------|
-| 💬 *any question* | Search API + Chat API - smart answer |
+## 💻 User Commands
+
+Type at the `Talk to me, Dave` prompt:
+
+| Input | What happens |
+|-------|-------------|
+| 💬 *any question* | Orchestrator plans tools, executes, shows answer |
 | 🔄 `scan` | Force re-run all missions now |
-| 📅 `missions` | Show mission schedule and status |
 | 🔁 `reset` | Start fresh Copilot conversation |
 | 👋 `exit` | Quit HAL |
 
-## 🏗️ Architecture
+## 📂 Project Structure
 
 ```
 HAL/
-├── main.py              <- 🚀 Entry point (run this)
+├── main.py              <- 🚀 Entry point + boot sequence + dashboard loop
 ├── requirements.txt     <- 📦 Python dependencies
 ├── README.md
 ├── .env                 <- 🔐 Your credentials (gitignored)
 ├── .env.example         <- 📝 Template for .env
 ├── .gitignore
+├── logs/                <- 📋 Audit logs (gitignored)
+│   └── hal_audit.jsonl
 └── src/
     ├── __init__.py
     ├── auth.py          <- 🔑 MSAL authentication with persistent token cache
-    ├── brain.py         <- 🧠 Copilot APIs (Chat, Search, Retrieval, Meeting Insights)
+    ├── brain.py         <- 🧠 Copilot APIs + plan_and_execute orchestrator
+    ├── orchestrator.py  <- 📋 Planner prompt with dynamic tool registry
     ├── missions.py      <- 📡 Mission definitions (edit prompts here)
     ├── scheduler.py     <- ⏱️ Task timer and scheduling logic
-    ├── sounds.py        <- 🔊 Spacecraft beeps and tones (winsound)
+    ├── dashboard.py     <- 🖥️ Rich Live Layout command center UI
+    ├── sounds.py        <- 🔊 Spacecraft beeps and tones
+    ├── audit.py         <- 📋 Audit logging (plan, steps, results)
     ├── config.py        <- ⚙️ Environment config loader
     ├── mcp_client.py    <- 🔌 MCP hub - connect to any MCP server
     └── mcp_servers.py   <- 🌐 MCP server config (add servers here)
@@ -161,20 +294,31 @@ HAL/
 
 ## 🔌 MCP Integration
 
-HAL can consume external **Model Context Protocol (MCP)** servers to gain new capabilities. Configure servers in `src/mcp_servers.py`:
+HAL can consume external **Model Context Protocol (MCP)** servers. Configure in `src/mcp_servers.py`:
 
 ```python
 MCP_SERVERS = [
-    {"name": "m365", "target": "http://localhost:8080/mcp"},
-    {"name": "mytools", "target": "path/to/my_mcp_server.py"},
+    {"name": "github", "target": "npx -y @modelcontextprotocol/server-github", "enabled": True},
+    {"name": "jira", "target": "npx -y @modelcontextprotocol/server-jira", "enabled": True},
+    {"name": "postgres", "target": "npx -y @modelcontextprotocol/server-postgres", "enabled": True},
 ]
 ```
 
-🔗 HAL connects on startup, discovers tools, and makes them available. Supports both HTTP (remote) and stdio (local script) transports via FastMCP.
+MCP tools are **automatically registered** with the orchestrator on startup. The planner discovers them and includes them in its routing decisions.
+
+## 📋 Audit Trail
+
+Every orchestrated execution is logged to `logs/hal_audit.jsonl`:
+
+```jsonl
+{"type":"plan","execution_id":"17108...","prompt":"List emails...","reasoning":"Email query - use chat tool","plan":[...]}
+{"type":"step","execution_id":"17108...","step":1,"tool":"chat","status":"ok","duration_ms":2340}
+{"type":"result","execution_id":"17108...","steps_ok":1,"steps_failed":0,"total_duration_ms":3200}
+```
+
+Logged fields: prompt, reasoning, tool selection, execution status, timing per step, final answer.
 
 ## 🔊 Sound Effects
-
-HAL plays spacecraft-style beeps using Windows `winsound`:
 
 | Event | Sound |
 |-------|-------|
@@ -185,7 +329,7 @@ HAL plays spacecraft-style beeps using Windows `winsound`:
 | ❌ Mission error | Low buzz |
 | ⚙️ System check tick | Tiny tick |
 | 💭 HAL quote | Soft chime |
-| ⌨️ User interrupt (ESC) | Descending tone |
+| ⌨️ User interrupt | Descending tone |
 | 🔄 Resume auto-pilot | Ascending tone |
 | 👋 Goodbye | Descending Daisy Bell |
 

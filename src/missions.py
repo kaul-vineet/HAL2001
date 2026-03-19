@@ -1,14 +1,15 @@
-"""HAL Missions — Scheduled system checks sent to M365 Copilot APIs.
+"""HAL Missions — Scheduled prompts sent to the orchestrator.
 
-Each mission IS a system check. When HAL runs system checks, it's
-actually calling Copilot APIs and displaying real results.
+Each mission is just a natural language prompt. The orchestrator (Copilot Chat API)
+decides which tools to call (Chat, Search, Retrieval, Meeting Insights, MCP servers)
+and in what order. HAL executes the plan and displays results.
 
 Mission types:
-    "chat"     → Copilot Chat API (natural language Q&A)
-    "meeting"  → Meeting Insights API (action items, summaries)
-    "search"   → Search API (document discovery)
+    "smart"  → Orchestrator plans tools automatically (recommended)
+    "chat"   → Force direct Chat API call (bypass orchestrator)
 
 To add a new mission: add an entry to MISSIONS below. That's it.
+The orchestrator figures out the rest.
 """
 
 MISSIONS = [
@@ -17,10 +18,11 @@ MISSIONS = [
         "id": "email-scan",
         "code": "MAIL",
         "label": "Outlook Inbox",
-        "type": "chat",
+        "type": "smart",
         "prompt": (
-            "Summarize my emails from the last 100 days in 2-3 lines. "
-            "Highlight the key topics discussed across emails."
+            "List my emails from the last 100 days. For each email show: "
+            "sender name, subject line, and date received. "
+            "Group by sender. Show actual email subjects, not summaries."
         ),
         "interval": 30,
     },
@@ -28,10 +30,12 @@ MISSIONS = [
         "id": "teams-activity",
         "code": "TEAM",
         "label": "Teams",
-        "type": "chat",
+        "type": "smart",
         "prompt": (
-            "Summarize and highlight the key topics of my Teams messages "
-            "and mentions from the last 100 days in 2-3 lines."
+            "List my Teams messages and mentions from the last 100 days. "
+            "For each show: who sent it, which channel or chat, "
+            "the actual message text (first line), and date. "
+            "Show real messages, not a summary."
         ),
         "interval": 30,
     },
@@ -41,8 +45,11 @@ MISSIONS = [
         "id": "meeting-insights",
         "code": "MEET",
         "label": "Meeting Insights",
-        "type": "meeting",
-        "prompt": None,
+        "type": "smart",
+        "prompt": (
+            "Get my recent meeting action items, notes, and any mentions "
+            "of me. List action items with owners."
+        ),
         "interval": 30,
     },
 
@@ -51,7 +58,7 @@ MISSIONS = [
         "id": "planner-tasks",
         "code": "PLAN",
         "label": "Planner Tasks",
-        "type": "chat",
+        "type": "smart",
         "prompt": (
             "In ONE line: how many Planner tasks are overdue or due today, "
             "and their titles. Max 3 items."
@@ -62,7 +69,7 @@ MISSIONS = [
         "id": "ado-check",
         "code": "ADO",
         "label": "Azure DevOps",
-        "type": "chat",
+        "type": "smart",
         "prompt": (
             "In ONE line: how many ADO work items are assigned to me that "
             "are in progress or blocked. Just count and titles."
@@ -75,10 +82,10 @@ MISSIONS = [
         "id": "sharepoint-docs",
         "code": "SHRP",
         "label": "SharePoint Docs",
-        "type": "chat",
+        "type": "smart",
         "prompt": (
-            "In ONE line: any documents shared with me or modified in my "
-            "SharePoint sites in the last 100 days. Just count and names."
+            "Find documents shared with me or modified in my "
+            "SharePoint sites in the last 100 days. List file names."
         ),
         "interval": 30,
     },
@@ -88,7 +95,7 @@ MISSIONS = [
         "id": "sales-check",
         "code": "SALE",
         "label": "Sales",
-        "type": "chat",
+        "type": "smart",
         "prompt": (
             "In ONE line: any time-sensitive sales emails, proposals, or "
             "customer follow-ups from today. Just count and deal names."
@@ -96,17 +103,15 @@ MISSIONS = [
         "interval": 30,
     },
 
-    # ── Retrieval-based checks (RAG from org docs) ───────────────
+    # ── Document content (orchestrator will use Retrieval API) ───
     {
         "id": "policy-updates",
         "code": "PLCY",
         "label": "Motor Control Brief",
-        "type": "retrieval",
-        "query": "Motor Control Optimization Brief",
-        "data_source": "sharePoint",
-        "instruction": (
-            "Give details of Motor Control Optimization Brief. "
-            "Summarize key points, objectives, and any action items."
+        "type": "smart",
+        "prompt": (
+            "Find and extract the Motor Control Optimization Brief from "
+            "SharePoint. Summarize key points, objectives, and action items."
         ),
         "interval": 30,
     },
@@ -114,12 +119,11 @@ MISSIONS = [
         "id": "compliance-check",
         "code": "COMP",
         "label": "Compliance",
-        "type": "retrieval",
-        "query": "compliance requirements data retention security updates last 100 days",
-        "data_source": "sharePoint",
-        "instruction": (
-            "In ONE line: any compliance updates needing attention? "
-            "If none, say 'All clear'. If yes, one-line summary."
+        "type": "smart",
+        "prompt": (
+            "Check SharePoint for any compliance updates, data retention "
+            "or security policy changes in the last 100 days. "
+            "Extract exact text if found. If none, say 'All clear'."
         ),
         "interval": 30,
     },
@@ -127,12 +131,10 @@ MISSIONS = [
         "id": "project-docs",
         "code": "PROJ",
         "label": "Project Docs",
-        "type": "retrieval",
-        "query": "project status updates milestones deliverables last 100 days",
-        "data_source": "sharePoint",
-        "instruction": (
-            "In ONE line: any project doc updates in the last 100 days? "
-            "Just count and doc names. If none, say 'No updates'."
+        "type": "smart",
+        "prompt": (
+            "Find any project status updates, milestones, or deliverables "
+            "documents modified in the last 100 days. List file names and summarize."
         ),
         "interval": 30,
     },
@@ -140,23 +142,12 @@ MISSIONS = [
         "id": "knowledge-base",
         "code": "KNOW",
         "label": "Knowledge Base",
-        "type": "retrieval",
-        "query": "recently added or updated knowledge articles how-to guides last 100 days",
-        "data_source": "sharePoint",
-        "instruction": (
-            "In ONE line: any new knowledge base articles? "
-            "Just count and titles. If none, say 'No new articles'."
+        "type": "smart",
+        "prompt": (
+            "Search for recently added or updated knowledge base articles "
+            "and how-to guides in SharePoint from the last 100 days. "
+            "List titles."
         ),
-        "interval": 30,
-    },
-
-    # ── Search-based checks (document discovery) ─────────────────
-    {
-        "id": "recent-docs",
-        "code": "DOCS",
-        "label": "Recent Documents",
-        "type": "search",
-        "query": "documents shared with me or modified in the last 100 days",
         "interval": 30,
     },
 
@@ -165,15 +156,17 @@ MISSIONS = [
         "id": "daily-briefing",
         "code": "BREF",
         "label": "Daily Briefing",
-        "type": "chat",
+        "type": "smart",
         "prompt": (
-            "Give me a 4-line morning briefing. One line each for: "
-            "1) Calendar today (count + any conflicts) "
-            "2) Urgent unread emails (count + top sender) "
-            "3) Unread Teams messages (count) "
-            "4) Overdue tasks (count). "
-            "No extra detail. Be terse."
+            "Give me a morning briefing. Include: "
+            "1) Calendar for today with any conflicts "
+            "2) Urgent unread emails "
+            "3) Unread Teams messages "
+            "4) Overdue Planner tasks "
+            "5) Action items from recent meetings. "
+            "Keep each point to one line."
         ),
         "interval": 0,
     },
 ]
+
