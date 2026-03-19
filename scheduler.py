@@ -6,14 +6,9 @@ To add a new scheduled task:
     3. Register it with scheduler.register(...)
 """
 
-import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
-
-from rich.console import Console
-
-console = Console()
 
 # Type aliases
 RunFn = Callable[[], Awaitable[Any]]

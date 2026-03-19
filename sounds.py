@@ -6,8 +6,6 @@ to simulate a spacecraft console. No external dependencies needed.
 On non-Windows systems, sounds are silently skipped.
 """
 
-import sys
-
 try:
     import winsound
     HAS_SOUND = True

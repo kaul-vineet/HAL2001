@@ -3,15 +3,12 @@
 import asyncio
 import random
 import sys
-import time
 
 from datetime import datetime
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
 from rich.table import Table
 from rich.rule import Rule
-from rich.columns import Columns
 from rich.padding import Padding
 
 from config import Config
@@ -303,113 +300,6 @@ async def run_system_checks(stop_event: asyncio.Event) -> None:
 
 # ── Display helpers ──────────────────────────────────────────────
 
-def display_email_scan(scan_result: dict) -> None:
-    """Render the email scan results with highlighted reply-needed mails."""
-    all_emails = scan_result["all"]
-    needs_reply = scan_result["needs_reply"]
-    now = datetime.now().strftime("%I:%M %p")
-
-    # ── Divider ──────────────────────────────────────────────────
-    console.print(Rule(f"[bold cyan]📡 Email Scan — {now}[/bold cyan]", style="cyan"))
-    console.print()
-
-    # ── Summary cards side by side ───────────────────────────────
-    total_card = Panel(
-        Text(f"📬  {len(all_emails)}", style="bold cyan", justify="center"),
-        title="Total Today",
-        border_style="cyan",
-        width=25,
-    )
-    reply_card = Panel(
-        Text(f"🔴  {len(needs_reply)}", style="bold red", justify="center"),
-        title="Need Reply",
-        border_style="red" if needs_reply else "green",
-        width=25,
-    )
-    read_count = sum(1 for e in all_emails if e["read"])
-    read_card = Panel(
-        Text(f"✅  {read_count}", style="bold green", justify="center"),
-        title="Already Read",
-        border_style="green",
-        width=25,
-    )
-    console.print(Columns([total_card, reply_card, read_card], padding=(0, 2)))
-    console.print()
-
-    # ── Emails that need a reply ─────────────────────────────────
-    if needs_reply:
-        table = Table(
-            title="⚡ ACTION REQUIRED — Reply to these",
-            title_style="bold red",
-            border_style="red",
-            show_lines=True,
-            padding=(0, 1),
-        )
-        table.add_column("#", style="bold white", width=3)
-        table.add_column("From", style="bold yellow", max_width=25)
-        table.add_column("Subject", style="bold white")
-        table.add_column("Preview", style="dim italic", max_width=45)
-        table.add_column("Time", style="cyan", width=12)
-        table.add_column("Flags", style="magenta", width=8)
-
-        for i, email in enumerate(needs_reply, 1):
-            flags = []
-            if email["importance"].lower() == "high":
-                flags.append("🔥")
-            if email["is_flagged"]:
-                flags.append("🚩")
-            if email["has_attachments"]:
-                flags.append("📎")
-            received = email["received"]
-            time_str = received[11:16] if len(received) > 16 else received
-            table.add_row(
-                str(i),
-                email["from_name"] or email["from_addr"],
-                email["subject"],
-                email["preview"],
-                time_str,
-                " ".join(flags) if flags else "",
-            )
-        console.print(Padding(table, (0, 2)))
-    else:
-        console.print(
-            Panel(
-                "[bold green]✅ All clear! No emails need your immediate reply.[/bold green]",
-                border_style="green",
-                padding=(1, 2),
-            )
-        )
-
-    # ── Other emails (read / CC'd) ──────────────────────────────
-    other_emails = [e for e in all_emails if e not in needs_reply]
-    if other_emails:
-        console.print()
-        console.print(Rule("[dim]Other emails today[/dim]", style="dim"))
-        console.print()
-        table = Table(
-            border_style="dim",
-            show_header=True,
-            header_style="dim bold",
-            padding=(0, 1),
-        )
-        table.add_column("From", style="dim", max_width=25)
-        table.add_column("Subject")
-        table.add_column("Status", width=8, justify="center")
-        for email in other_emails[:15]:
-            status = "[green]read[/green]" if email["read"] else "[yellow]● new[/yellow]"
-            subj_style = "dim" if email["read"] else ""
-            table.add_row(
-                email["from_name"] or email["from_addr"],
-                f"[{subj_style}]{email['subject']}[/{subj_style}]" if subj_style else email["subject"],
-                status,
-            )
-        if len(other_emails) > 15:
-            table.add_row("", f"[dim]... and {len(other_emails) - 15} more[/dim]", "")
-        console.print(Padding(table, (0, 2)))
-
-    console.print()
-    console.print(Rule(style="dim"))
-
 
 def display_copilot_response(mission_id: str, label: str, response: str) -> None:
     """Render a Copilot Chat API response in spacecraft style."""
@@ -667,6 +557,14 @@ async def idle_with_scheduler(
 
 async def main():
     """Run the interactive CLI agent loop with scheduled tasks."""
+    import argparse
+    parser = argparse.ArgumentParser(description="HAL 9000 — M365 Copilot CLI Agent")
+    parser.add_argument(
+        "--relogin", action="store_true",
+        help="Force fresh login — clears cached tokens and opens browser"
+    )
+    args = parser.parse_args()
+
     console.print(Panel(BANNER, border_style="bold red", padding=(0, 0)))
 
     # Validate configuration
@@ -682,10 +580,10 @@ async def main():
     # ── Authenticate + Initialize Brain ──────────────────────────
     console.print("[bold yellow]  ▸ Establishing secure link to Microsoft 365...[/bold yellow]")
     try:
-        # MSAL: tries silent (cached) first, then interactive browser
-        token = acquire_token()
         brain = Brain()
-        # Verify connection by starting a Copilot conversation
+        # Force initial token acquisition (verifies credentials)
+        acquire_token(force=args.relogin)
+        # Verify Copilot connection
         await brain._ensure_conversation()
         sounds.auth_success()
         console.print(

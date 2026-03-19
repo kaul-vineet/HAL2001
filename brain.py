@@ -7,13 +7,10 @@ Meeting Insights API: AI-generated summaries, action items from Teams meetings.
 Requires: M365 Copilot license per user.
 """
 
-import json
 import httpx
 from rich.console import Console
 
 from auth import acquire_token
-
-console = Console()
 
 GRAPH_BASE = "https://graph.microsoft.com/beta"
 GRAPH_V1 = "https://graph.microsoft.com/v1.0"
@@ -168,7 +165,10 @@ class Brain:
         client = await self._client()
         resp = await client.post(f"{GRAPH_BASE}/copilot/conversations", json={})
         resp.raise_for_status()
-        self._conversation_id = resp.json()["id"]
+        data = resp.json()
+        self._conversation_id = data.get("id")
+        if not self._conversation_id:
+            raise RuntimeError(f"Copilot did not return conversation ID: {data}")
         return self._conversation_id
 
     async def ask(self, prompt: str, web_search: bool = True) -> str:
@@ -212,7 +212,9 @@ class Brain:
         # Get current user ID
         me_resp = await client.get(f"{GRAPH_V1}/me", params={"$select": "id"})
         me_resp.raise_for_status()
-        user_id = me_resp.json()["id"]
+        user_id = me_resp.json().get("id")
+        if not user_id:
+            return []
 
         # Get recent calendar events that are Teams meetings (last 24 hours)
         from datetime import datetime, timezone, timedelta

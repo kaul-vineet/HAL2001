@@ -31,6 +31,7 @@ class LocalTokenCache(TokenCache):
 
         if not os.path.exists(self._cache_location):
             with self._lock:
+                self._cache = {}
                 with open(self._cache_location, "w") as f:
                     json.dump({}, f)
         else:
@@ -63,15 +64,29 @@ TOKEN_CACHE = LocalTokenCache(CACHE_PATH)
 GRAPH_SCOPES = ["https://graph.microsoft.com/.default"]
 
 
-def acquire_token() -> str:
+def acquire_token(force: bool = False) -> str:
     """Acquire a Graph API access token using MSAL.
 
     Tries silent acquisition first (from cache), falls back to
     interactive browser login.
 
+    Args:
+        force: If True, deletes cached tokens and forces a fresh browser login.
+
     Returns:
         Access token string.
     """
+    if force:
+        # Wipe cached tokens to force fresh login
+        if os.path.exists(CACHE_PATH):
+            os.remove(CACHE_PATH)
+            console.print(
+                "  [yellow]⚠[/yellow] [bold yellow]Token cache cleared — forcing fresh login[/bold yellow]"
+            )
+        # Re-init cache
+        global TOKEN_CACHE
+        TOKEN_CACHE = LocalTokenCache(CACHE_PATH)
+
     pca = PublicClientApplication(
         client_id=Config.AZURE_CLIENT_ID,
         authority=f"https://login.microsoftonline.com/{Config.AZURE_TENANT_ID}",
@@ -79,7 +94,7 @@ def acquire_token() -> str:
     )
 
     response = None
-    retry_interactive = False
+    retry_interactive = force  # skip silent if forced
 
     try:
         accounts = pca.get_accounts()
