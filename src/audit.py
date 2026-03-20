@@ -27,9 +27,30 @@ console = Console()
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "hal_audit.jsonl")
 
+# Unique session ID for this HAL run
+SESSION_ID = f"session_{int(time.time())}"
+
 
 def _ensure_log_dir():
     os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def log_session_start():
+    """Write a session separator at HAL startup."""
+    _ensure_log_dir()
+    now = datetime.now(timezone.utc).isoformat()
+    separator = {
+        "type": "session_start",
+        "session_id": SESSION_ID,
+        "timestamp": now,
+        "message": "═" * 60,
+    }
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write("\n")
+        f.write(f"# ══════════════════════════════════════════════════════════\n")
+        f.write(f"# HAL 9000 SESSION: {SESSION_ID}  |  {now}\n")
+        f.write(f"# ══════════════════════════════════════════════════════════\n")
+        f.write(json.dumps(separator, ensure_ascii=False) + "\n")
 
 
 def log_plan(
@@ -55,6 +76,7 @@ def log_plan(
 
     entry = {
         "type": "plan",
+        "session_id": SESSION_ID,
         "execution_id": execution_id,
         "timestamp": now,
         "source": source,
@@ -94,6 +116,7 @@ def log_step(
 
     entry = {
         "type": "step",
+        "session_id": SESSION_ID,
         "execution_id": execution_id,
         "timestamp": now,
         "step": step,
@@ -133,6 +156,7 @@ def log_result(
 
     entry = {
         "type": "result",
+        "session_id": SESSION_ID,
         "execution_id": execution_id,
         "timestamp": now,
         "prompt": prompt,

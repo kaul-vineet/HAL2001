@@ -18,7 +18,7 @@ from src.scheduler import Scheduler
 from src.missions import MISSIONS
 from src.mcp_client import MCPHub
 from src.mcp_servers import MCP_SERVERS
-from src.audit import display_audit_trail
+from src.audit import display_audit_trail, log_session_start
 from src import sounds
 
 console = Console()
@@ -637,6 +637,9 @@ async def main():
         console.print("  Copy .env.example to .env and fill in the required values.")
         sys.exit(1)
 
+    # ── Start audit session ─────────────────────────────────────
+    log_session_start()
+
     # ── Boot sequence ────────────────────────────────────────────
     await boot_sequence()
 
@@ -905,5 +908,10 @@ async def main():
         await brain.close()
 
 
-if __name__ == "__main__":
+def cli():
+    """Entry point for the 'hal' command."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    cli()

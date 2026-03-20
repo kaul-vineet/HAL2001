@@ -1,0 +1,15 @@
+[project]
+name = "hal9000"
+version = "1.0.0"
+description = "HAL 9000 — M365 Copilot Command Center Agent"
+requires-python = ">=3.10"
+dependencies = [
+    "msal>=1.28.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "httpx>=0.28.0",
+    "fastmcp>=2.0.0",
+]
+
+[project.scripts]
+hal = "main:cli"

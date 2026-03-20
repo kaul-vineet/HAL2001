@@ -308,15 +308,110 @@ MCP tools are **automatically registered** with the orchestrator on startup. The
 
 ## 📋 Audit Trail
 
-Every orchestrated execution is logged to `logs/hal_audit.jsonl`:
+All orchestrator decisions and tool executions are logged to `logs/hal_audit.jsonl`. Each HAL session is separated with a clear header.
 
-```jsonl
-{"type":"plan","execution_id":"17108...","prompt":"List emails...","reasoning":"Email query - use chat tool","plan":[...]}
-{"type":"step","execution_id":"17108...","step":1,"tool":"chat","status":"ok","duration_ms":2340}
-{"type":"result","execution_id":"17108...","steps_ok":1,"steps_failed":0,"total_duration_ms":3200}
+### Log location
+
+```
+C:\demoprojects\HAL\logs\hal_audit.jsonl
 ```
 
-Logged fields: prompt, reasoning, tool selection, execution status, timing per step, final answer.
+### Session separators
+
+Each time HAL starts, a session block is written:
+
+```
+# ══════════════════════════════════════════════════════════
+# HAL 9000 SESSION: session_1710886234  |  2026-03-19T21:02:00Z
+# ══════════════════════════════════════════════════════════
+```
+
+### Log entry types
+
+Every execution produces 3 correlated entries sharing the same `execution_id` and `session_id`:
+
+**1. Plan** — what the orchestrator decided
+
+```json
+{
+  "type": "plan",
+  "session_id": "session_1710886234",
+  "execution_id": "1710886247123",
+  "timestamp": "2026-03-19T21:02:15Z",
+  "source": "mission",
+  "prompt": "List my emails with sender, subject, date",
+  "reasoning": "Email query — chat tool has live M365 data access",
+  "plan": [
+    {"step": 1, "tool": "chat", "args": {"query": "..."}, "description": "Query emails"}
+  ]
+}
+```
+
+**2. Step** (one per tool call) — what happened at each step
+
+```json
+{
+  "type": "step",
+  "session_id": "session_1710886234",
+  "execution_id": "1710886247123",
+  "step": 1,
+  "tool": "chat",
+  "description": "Query emails from M365",
+  "status": "ok",
+  "duration_ms": 2340,
+  "result_preview": "You have 12 emails today..."
+}
+```
+
+**3. Result** — final outcome
+
+```json
+{
+  "type": "result",
+  "session_id": "session_1710886234",
+  "execution_id": "1710886247123",
+  "prompt": "List my emails...",
+  "final_answer": "12 emails today...",
+  "total_steps": 1,
+  "steps_ok": 1,
+  "steps_failed": 0,
+  "total_duration_ms": 3200
+}
+```
+
+### Querying logs (PowerShell)
+
+```powershell
+# Last 10 entries
+Get-Content .\logs\hal_audit.jsonl | Select-Object -Last 10
+
+# Pretty print latest result
+Get-Content .\logs\hal_audit.jsonl | Select-Object -Last 1 | ConvertFrom-Json | ConvertTo-Json -Depth 5
+
+# All plans from current session
+Get-Content .\logs\hal_audit.jsonl | Where-Object { $_ -match '"type":"plan"' } | Select-Object -Last 5
+
+# All errors
+Get-Content .\logs\hal_audit.jsonl | Where-Object { $_ -match '"status":"error"' }
+
+# Filter by session
+Get-Content .\logs\hal_audit.jsonl | Where-Object { $_ -match 'session_1710886234' }
+```
+
+### What's auditable
+
+| Field | Logged |
+|-------|--------|
+| Session ID | ✅ Which HAL run |
+| What was asked | ✅ `prompt` |
+| Why these tools | ✅ `reasoning` |
+| Which tools, what order | ✅ `plan[]` |
+| Each step result + timing | ✅ `step` entries with `duration_ms` |
+| Success/failure per step | ✅ `status` |
+| Final answer | ✅ `final_answer` |
+| Source (mission vs user) | ✅ `source` |
+
+Logs are gitignored and stay local only.
 
 ## 🔊 Sound Effects
 
