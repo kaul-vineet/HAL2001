@@ -4,3 +4,4 @@ __pycache__/
 .env
 .local_token_cache.json
 logs/
+*.egg-info/
